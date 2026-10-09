@@ -50,6 +50,27 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 	return &out, nil
 }
 
+// Stream sends a chat request and returns the reply as a stream. Usage is always requested.
+func (s *ChatService) Stream(ctx context.Context, p ChatParams) (*ChatStream, error) {
+	body, berr := p.body(true)
+	if berr != nil {
+		return nil, berr
+	}
+
+	idem, kerr := p.key()
+	if kerr != nil {
+		return nil, kerr
+	}
+
+	resp, err := s.t.do(ctx, call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
+		accept: "text/event-stream", idempotencyKey: idem, policy: retryRetryable})
+	if err != nil {
+		return nil, err
+	}
+
+	return newChatStream(ctx, resp), nil
+}
+
 // ModelsService lists models.
 type ModelsService struct{ t *transport }
 
