@@ -27,7 +27,8 @@ if ! git diff --quiet -- internal/gen; then
 fi
 
 # [5] The module uses the standard library only, tests included.
-third=$(go list -deps -test -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... | grep -v '^meridian.local/meridian-go' || true)
+module=$(go list -m)
+third=$(go list -deps -test -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... | grep -v "^$module" || true)
 if [ -n "$third" ]; then echo "third-party imports: $third" >&2; exit 1; fi
 
 echo "gate: all checks passed"

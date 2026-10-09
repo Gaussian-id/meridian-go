@@ -341,14 +341,34 @@ func TestTemperatureIsForwardedOnlyAsANumber(t *testing.T) {
 	}
 }
 
+// nested is n arrays inside one another: n levels deep.
+func nested(n int) string { return strings.Repeat("[", n) + strings.Repeat("]", n) }
+
+// withExtra is a valid chat body whose "x" member holds extra. The body object is level 1, so
+// extra's own depth d makes the whole body d+1 levels deep.
+func withExtra(extra string) string { return msgs + `,"x":` + extra + `}` }
+
 func TestBadBodiesAre400(t *testing.T) {
-	for _, body := range []string{``, `null`, `[]`, `"x"`, `{"messages":"hi"}`, `{"messages":[]}`, `{"messages":null}`,
-		`{"messages":[1]}`, `{"messages":[{"role":"user"},"x"]}`, `{`, msgs + `} trailing`} {
+	for name, body := range map[string]string{
+		"empty": ``, "null": `null`, "array": `[]`, "string": `"x"`, "messages a string": `{"messages":"hi"}`,
+		"messages empty": `{"messages":[]}`, "messages null": `{"messages":null}`, "messages not objects": `{"messages":[1]}`,
+		"one message not an object": `{"messages":[{"role":"user"},"x"]}`, "truncated": `{`, "trailing text": msgs + `} trailing`,
+		// UTF-8 only, as meridian-python: a byte that is not UTF-8 is refused, not replaced.
+		"invalid UTF-8 in a string":      "{\"messages\":[{\"role\":\"user\",\"content\":\"a\xffb\"}]}",
+		"invalid UTF-8 outside a string": msgs + "}\xff",
+		"truncated UTF-8 sequence":       "{\"messages\":[{\"role\":\"user\",\"content\":\"a\xe2\x82\"}]}",
+		"UTF-8 byte order mark":          "\xef\xbb\xbf" + msgs + "}",
+		// The body object is level 1: 64 levels are allowed, 65 are not.
+		"depth 65":     withExtra(nested(64)),
+		"depth 10,001": withExtra(nested(10_000)),
+		"depth 65 after a string with an escaped quote and backslash": msgs + `,"s":"a\"[[[\\","x":` + nested(64) + `}`,
+		"depth 65 of objects": msgs + `,"x":` + strings.Repeat(`{"a":`, 64) + `1` + strings.Repeat(`}`, 64) + `}`,
+	} {
 		e := fakeengine.New()
 		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(body))
 
 		if w.Code != 400 || errorCode(w) != "invalid_request" || len(e.Requests()) != 0 {
-			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+			t.Errorf("%s: %d %s", name, w.Code, w.Body.String())
 		}
 	}
 
@@ -357,6 +377,23 @@ func TestBadBodiesAre400(t *testing.T) {
 
 	if w := serve(handler(t, fakeengine.New(), allowAll, forward.AllowRule{}), noBody); w.Code != 400 {
 		t.Errorf("nil body: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDeepButLegalBodiesAreForwarded(t *testing.T) {
+	for name, body := range map[string]string{
+		"depth 64":                       withExtra(nested(63)),
+		"brackets and braces in strings": msgs + `,"x":"` + strings.Repeat(`[{`, 200) + `"}`,
+		"escaped quotes in strings":      msgs + `,"x":"` + strings.Repeat(`\"[{`, 200) + `"}`,
+		"a string ending in an escaped backslash, then depth 64": msgs + `,"s":"[[[[\\","x":` + nested(63) + `}`,
+		"non-ASCII text": `{"messages":[{"role":"user","content":"Halo é 日本 😀 😀"}]}`,
+	} {
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: fakeengine.Completion("ok")})
+
+		if w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(body)); w.Code != 200 || len(e.Requests()) != 1 {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body.String())
+		}
 	}
 }
 
@@ -496,6 +533,79 @@ func TestEndUserAndEngineSideRefusalsPassThrough(t *testing.T) {
 				t.Errorf("%s %s: %d %s", code, body, w.Code, w.Body.String())
 			}
 		}
+	}
+}
+
+func TestAnUnrecognisedEngineCodeIsAGeneric503(t *testing.T) {
+	// A code the SDK has not heard of could be one more about the app's own account, so a browser
+	// gets the generic 503 for it too: before the stream starts (buffered and streamed) and inside it.
+	frame := `{"error":{"message":"secret detail","type":"api_error","code":"brand_new","request_id":"rq"}}`
+
+	for _, body := range []string{msgs + "}", msgs + `,"stream":true}`} {
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Status: 409, Body: []byte(frame), Header: map[string]string{"X-Request-Id": "rq"}})
+
+		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(body))
+
+		if w.Code != 503 || strings.Contains(w.Body.String(), "brand_new") || strings.Contains(w.Body.String(), "secret detail") {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+
+		wantGeneric(t, body, w.Body.Bytes(), "rq")
+	}
+
+	e := fakeengine.New()
+	e.On("POST", chatPath, fakeengine.Reply{Body: fakeengine.SSE(fakeengine.Chunk("a"), frame)})
+
+	w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+`,"stream":true}`))
+	body := w.Body.String()
+
+	if !strings.HasPrefix(body, string(fakeengine.SSE(fakeengine.Chunk("a")))) || strings.Contains(body, "brand_new") ||
+		strings.Contains(body, "secret detail") || strings.Contains(body, "[DONE]") {
+		t.Errorf("mid-stream: relayed %q", body)
+	}
+
+	wantGeneric(t, "mid-stream", lastFrame(body), "rq")
+}
+
+func TestAnErrorWhoseCodeIsMissingEmptyOrNotAStringIsAGeneric503(t *testing.T) {
+	// There is no code to judge, so the browser learns nothing: the generic 503 in every path.
+	for name, errorMember := range map[string]string{
+		"missing":   `{"message":"secret detail","type":"api_error","request_id":"rq"}`,
+		"empty":     `{"message":"secret detail","type":"api_error","code":"","request_id":"rq"}`,
+		"null":      `{"message":"secret detail","type":"api_error","code":null,"request_id":"rq"}`,
+		"number":    `{"message":"secret detail","type":"api_error","code":503,"request_id":"rq"}`,
+		"object":    `{"message":"secret detail","type":"api_error","code":{"a":"insufficient_credit"},"request_id":"rq"}`,
+		"array":     `{"message":"secret detail","type":"api_error","code":["insufficient_credit"],"request_id":"rq"}`,
+		"a boolean": `{"message":"secret detail","type":"api_error","code":true,"request_id":"rq"}`,
+	} {
+		wire := `{"error":` + errorMember + `}`
+
+		for _, body := range []string{msgs + "}", msgs + `,"stream":true}`} {
+			e := fakeengine.New()
+			e.On("POST", chatPath, fakeengine.Reply{Status: 502, Body: []byte(wire)})
+
+			w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(body))
+
+			if w.Code != 503 || strings.Contains(w.Body.String(), "secret detail") || strings.Contains(w.Body.String(), "insufficient_credit") {
+				t.Errorf("%s, %s: %d %s", name, body, w.Code, w.Body.String())
+			}
+
+			wantGeneric(t, name+", "+body, w.Body.Bytes(), "")
+		}
+
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: fakeengine.SSE(fakeengine.Chunk("a"), wire)})
+
+		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+`,"stream":true}`))
+		relayed := w.Body.String()
+
+		if !strings.HasPrefix(relayed, string(fakeengine.SSE(fakeengine.Chunk("a")))) || strings.Contains(relayed, "secret detail") ||
+			strings.Contains(relayed, "insufficient_credit") || strings.Contains(relayed, "[DONE]") {
+			t.Errorf("%s, mid-stream: relayed %q", name, relayed)
+		}
+
+		wantGeneric(t, name+", mid-stream", lastFrame(relayed), "")
 	}
 }
 

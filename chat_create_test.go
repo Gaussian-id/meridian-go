@@ -125,6 +125,59 @@ func TestCreateDecodesTheEngineEnvelope(t *testing.T) {
 	}
 }
 
+// rawEnvelope is an engine error body written out by hand, for codes and types the SDK has not heard of.
+func rawEnvelope(typ, code string) []byte {
+	return []byte(`{"error":{"message":"A new refusal.","type":"` + typ + `","code":"` + code + `","request_id":"req-n"}}`)
+}
+
+func TestAnUnrecognisedEngineCodeFailsClosedAsInternal(t *testing.T) {
+	// A code added to the engine after this SDK was built could be about the app's own account, so
+	// it is never taken for something retryable or harmless: it is internal, whatever the status.
+	for _, status := range []int{400, 429, 503} {
+		e := fakeengine.New()
+		e.On("POST", "/v1/chat/completions", fakeengine.Reply{Status: status, Body: rawEnvelope("api_error", "brand_new")})
+
+		_, err := newClient(e).Chat.Create(context.Background(), hello()) // the default of two retries
+		got := asError(t, err)
+
+		if got.Code != meridian.CodeInternal || got.EngineCode != "brand_new" || got.Type != meridian.TypeAPI || got.Status != status ||
+			got.Retryable || got.Message != "A new refusal." || got.RequestID != "req-n" {
+			t.Errorf("HTTP %d: got %+v", status, got)
+		}
+
+		if n := len(e.Requests()); n != 1 {
+			t.Errorf("HTTP %d: an unrecognised code must not be retried, sent %d requests", status, n)
+		}
+	}
+}
+
+func TestEngineCodeIsEmptyForACodeTheSDKKnows(t *testing.T) {
+	e := fakeengine.New()
+	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Status: 500, Body: fakeengine.Envelope("internal", "Internal error.", "r")})
+
+	_, err := newClient(e, meridian.WithMaxRetries(0)).Chat.Create(context.Background(), hello())
+	if got := asError(t, err); got.Code != meridian.CodeInternal || got.EngineCode != "" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestAnUnrecognisedErrorTypeBecomesAPIError(t *testing.T) {
+	// The type is one of the engine's five or client_error; anything else is api_error. The code
+	// is judged on its own, so a known code keeps its retry behaviour.
+	for typ, want := range map[string]string{
+		"weird_error": meridian.TypeAPI, "client_error": meridian.TypeClient,
+		"rate_limit_error": meridian.TypeRateLimit, "invalid_request_error": meridian.TypeInvalidRequest,
+	} {
+		e := fakeengine.New()
+		e.On("POST", "/v1/chat/completions", fakeengine.Reply{Status: 429, Body: rawEnvelope(typ, "rate_limited")})
+
+		_, err := newClient(e, meridian.WithMaxRetries(0)).Chat.Create(context.Background(), hello())
+		if got := asError(t, err); got.Type != want || got.Code != meridian.CodeRateLimited || !got.Retryable || got.EngineCode != "" {
+			t.Errorf("type %q: got %+v, want type %q", typ, got, want)
+		}
+	}
+}
+
 func TestNonMeridianBodiesBecomeNetworkErrorsWithTheRealStatus(t *testing.T) {
 	for _, tc := range []struct {
 		status    int

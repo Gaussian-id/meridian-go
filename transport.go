@@ -2,6 +2,7 @@ package meridian
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	crand "crypto/rand"
 	"encoding/hex"
@@ -20,22 +21,17 @@ import (
 // It is private so a header timeout never satisfies errors.Is(err, context.Canceled).
 var errHeaderTimeout = errors.New("meridian: header timeout")
 
-type retryPolicy int
-
-const (
-	retryRetryable     retryPolicy = iota // retry any retryable error
-	retryRateLimitOnly                    // the request may have done work: retry only rate_limited
-)
-
+// call is one logical request. Which failures may be retried is derived from it (mayRetry), so
+// the zero value of every field is the safe choice.
 type call struct {
 	method         string
 	path           string // already escaped
 	query          url.Values
 	body           any
-	accept         string
-	idempotencyKey string
-	policy         retryPolicy
-	noContent      bool // the operation answers 204 with no body (a DELETE); no other call accepts a 204
+	accept         string // empty means application/json
+	idempotencyKey string // sent on every attempt; the engine replays a repeat instead of running it twice
+	repeatable     bool   // a repeat is harmless although there is no idempotency key (the engine replays on a reference)
+	noContent      bool   // the operation answers 204 with no body (a DELETE); no other call accepts a 204
 }
 
 type transport struct {
@@ -137,7 +133,7 @@ func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
 			return resp, nil
 		}
 
-		if attempt >= t.cfg.maxRetries || !allowed(c.policy, err) {
+		if attempt >= t.cfg.maxRetries || !mayRetry(c, err) {
 			return nil, err
 		}
 
@@ -159,17 +155,25 @@ func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
 // maxRetryAfter is the longest engine-requested wait the SDK will sleep for.
 const maxRetryAfter = 30 * time.Second
 
-// allowed reports whether the policy permits retrying err.
-func allowed(p retryPolicy, err *Error) bool {
+// maxErrorBodyBytes is how much of an error response is read to decode it (1 MiB); an envelope
+// is a few hundred bytes, so anything longer is not one.
+const maxErrorBodyBytes = 1 << 20
+
+// mayRetry reports whether a failed attempt of c may be repeated. Only an error that is retryable
+// at all qualifies. A request that may have reached the engine before it failed is repeated only
+// when that is harmless: a read or a delete, a call with an idempotency key, or one marked
+// repeatable. Any other call (a write the engine would run twice) is repeated only after a rate
+// limit, which means the engine did not run it.
+func mayRetry(c call, err *Error) bool {
 	if !err.Retryable {
 		return false
 	}
 
-	if p == retryRateLimitOnly {
-		return err.Code == CodeRateLimited
+	if c.idempotencyKey != "" || c.repeatable || c.method == http.MethodGet || c.method == http.MethodDelete {
+		return true
 	}
 
-	return true
+	return err.Code == CodeRateLimited
 }
 
 // backoff is exponential with jitter: 250–500 ms, doubling, capped at 4–8 s.
@@ -222,7 +226,7 @@ func (t *transport) attempt(ctx context.Context, c call, payload []byte) (*http.
 	}
 
 	req.Header.Set("Authorization", "Bearer "+t.key)
-	req.Header.Set("Accept", c.accept)
+	req.Header.Set("Accept", cmp.Or(c.accept, "application/json"))
 	req.Header.Set("User-Agent", t.cfg.userAgent)
 
 	if payload != nil {
@@ -260,7 +264,7 @@ func (t *transport) attempt(ctx context.Context, c call, payload []byte) (*http.
 
 	// [4] A failure: read the error body, then decode it.
 	if resp.StatusCode >= 400 {
-		data, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		data, rerr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		_ = resp.Body.Close()
 		cancel()
 
@@ -338,12 +342,7 @@ type requestIDSetter interface{ setRequestID(string) }
 // error. The error's Message never quotes the body (it may hold a secret, such as an issued
 // key); its wrapped cause is the decoder's own error, which can name a field or a byte.
 func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
-	// [1] Ask for JSON unless the caller wants something else.
-	if c.accept == "" {
-		c.accept = "application/json"
-	}
-
-	// [2] Send, retrying as the call's policy allows.
+	// [1] Send, retrying as mayRetry allows.
 	resp, err := t.do(ctx, c)
 	if err != nil {
 		return nil, err
@@ -351,7 +350,7 @@ func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 
 	defer resp.Body.Close()
 
-	// [3] Read the body. Only a call that expects no content may get a 204.
+	// [2] Read the body. Only a call that expects no content may get a 204.
 	var out T
 
 	switch {
@@ -383,7 +382,7 @@ func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 		}
 	}
 
-	// [4] A reply that carries the request id gets it from the header.
+	// [3] A reply that carries the request id gets it from the header.
 	if r, ok := any(&out).(requestIDSetter); ok {
 		r.setRequestID(resp.Header.Get("X-Request-Id"))
 	}

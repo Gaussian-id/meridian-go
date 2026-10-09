@@ -128,7 +128,11 @@ func TestSendOnANilOrZeroTransportRefuses(t *testing.T) {
 	}
 }
 
-func TestRetryPolicyAllowsOnlyWhatItsNameSays(t *testing.T) {
+// The retry rule is derived from the call itself, so a new operation cannot forget to choose one:
+// the zero call is the safe one (only a rate limit, which means the request never ran, is
+// repeated), and a call earns more only by being a read or a delete, carrying an idempotency key,
+// or being marked repeatable. The public tests pin each of these through a client.
+func TestAWriteIsRepeatedOnlyWhenTheCallSaysARepeatIsSafe(t *testing.T) {
 	rate := &Error{Code: CodeRateLimited, Retryable: true}
 	busy := &Error{Code: CodeServiceUnavailable, Retryable: true}
 	network := &Error{Code: CodeNetworkError, Retryable: true}
@@ -136,23 +140,30 @@ func TestRetryPolicyAllowsOnlyWhatItsNameSays(t *testing.T) {
 	hardLimit := &Error{Code: CodeHardLimitReached}
 
 	for _, tc := range []struct {
-		name   string
-		policy retryPolicy
-		err    *Error
-		want   bool
+		name string
+		c    call
+		err  *Error
+		want bool
 	}{
-		{"retryable: rate limit", retryRetryable, rate, true},
-		{"retryable: 503", retryRetryable, busy, true},
-		{"retryable: network", retryRetryable, network, true},
-		{"retryable: not retryable", retryRetryable, refused, false},
-		{"rate-limit-only: rate limit", retryRateLimitOnly, rate, true},
-		{"rate-limit-only: 503", retryRateLimitOnly, busy, false},
-		{"rate-limit-only: network", retryRateLimitOnly, network, false},
-		{"rate-limit-only: hard limit", retryRateLimitOnly, hardLimit, false},
-		{"rate-limit-only: not retryable", retryRateLimitOnly, refused, false},
+		{"zero call: rate limit", call{}, rate, true},
+		{"zero call: 503", call{}, busy, false},
+		{"zero call: network", call{}, network, false},
+		{"zero call: hard limit", call{}, hardLimit, false},
+		{"POST: 503", call{method: http.MethodPost}, busy, false},
+		{"PUT: network", call{method: http.MethodPut}, network, false},
+		{"PATCH: 503", call{method: http.MethodPatch}, busy, false},
+		{"POST: rate limit", call{method: http.MethodPost}, rate, true},
+		{"GET: 503", call{method: http.MethodGet}, busy, true},
+		{"GET: network", call{method: http.MethodGet}, network, true},
+		{"DELETE: 503", call{method: http.MethodDelete}, busy, true},
+		{"idempotency key: 503", call{method: http.MethodPost, idempotencyKey: "k"}, busy, true},
+		{"repeatable: network", call{method: http.MethodPost, repeatable: true}, network, true},
+		{"a read: not retryable", call{method: http.MethodGet}, refused, false},
+		{"every reason together: not retryable", call{method: http.MethodDelete, idempotencyKey: "k", repeatable: true}, refused, false},
+		{"zero call: not retryable", call{}, refused, false},
 	} {
-		if got := allowed(tc.policy, tc.err); got != tc.want {
-			t.Errorf("%s: allowed = %v, want %v", tc.name, got, tc.want)
+		if got := mayRetry(tc.c, tc.err); got != tc.want {
+			t.Errorf("%s: mayRetry = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

@@ -35,6 +35,22 @@ func TestRetryableFailuresAreRetriedWithTheSameIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestAReadIsRetriedWithoutAnIdempotencyKey(t *testing.T) {
+	e := fakeengine.New()
+	e.On("GET", "/v1/models",
+		fakeengine.Reply{Status: 503, Body: fakeengine.Envelope("service_unavailable", "busy", "r1")},
+		fakeengine.Reply{Body: fakeengine.ModelList("m1")})
+
+	models, err := newClient(e).Models.List(context.Background())
+	if err != nil || len(models) != 1 {
+		t.Fatalf("got %v err %v", models, err)
+	}
+
+	if reqs := e.Requests(); len(reqs) != 2 || reqs[0].Header.Get("Idempotency-Key") != "" {
+		t.Fatalf("want 2 attempts and no idempotency key, got %d", len(reqs))
+	}
+}
+
 func TestACallerIdempotencyKeyIsUsed(t *testing.T) {
 	e := fakeengine.New()
 	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Body: fakeengine.Completion("ok")})

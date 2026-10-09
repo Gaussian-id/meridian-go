@@ -97,21 +97,55 @@ func TestWriteErrorUsesTheEngineEnvelope(t *testing.T) {
 	}
 }
 
-func TestWriteErrorHidesServerMisconfiguration(t *testing.T) {
+// WriteError is a pure encoder (as meridian-js errorResponse): it hides nothing. A browser route
+// that must not learn why the server failed uses package forward, which shows the generic 503.
+func TestWriteErrorWritesAConfigurationErrorAsItIs(t *testing.T) {
 	w := httptest.NewRecorder()
 	meridian.WriteError(w, &meridian.Error{Code: meridian.CodeInvalidRequest, Type: meridian.TypeClient,
 		Message: "A Meridian key is required."})
 
-	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "key") {
+	var env struct {
+		Error struct{ Message, Type, Code string } `json:"error"`
+	}
+
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+
+	// No status: 502. The message and code are the error's own; only the SDK-only type is renamed.
+	if w.Code != http.StatusBadGateway || env.Error.Message != "A Meridian key is required." ||
+		env.Error.Code != "invalid_request" || env.Error.Type != "api_error" {
 		t.Fatalf("status %d body %s", w.Code, w.Body.String())
 	}
 }
 
-func TestWriteErrorMapsSDKFailuresTo502(t *testing.T) {
-	w := httptest.NewRecorder()
-	meridian.WriteError(w, &meridian.Error{Code: meridian.CodeNetworkError, Type: meridian.TypeClient, Message: "down"})
+func TestWriteErrorUsesTheErrorsStatusAndMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		e    *meridian.Error
+		want int
+	}{
+		{"no status", &meridian.Error{Code: meridian.CodeNetworkError, Type: meridian.TypeClient, Message: "down"}, 502},
+		{"aborted, no status", &meridian.Error{Code: meridian.CodeAborted, Type: meridian.TypeClient, Message: "cancelled"}, 502},
+		{"its own error status", &meridian.Error{Code: meridian.CodeNetworkError, Type: meridian.TypeClient, Status: 503, Message: "down"}, 503},
+		{"a success status is not an error", &meridian.Error{Code: meridian.CodeNetworkError, Type: meridian.TypeClient, Status: 200, Message: "bad body"}, 502},
+		{"a status HTTP does not have", &meridian.Error{Code: meridian.CodeInternal, Type: meridian.TypeAPI, Status: 1000, Message: "x"}, 502},
+		{"a negative status", &meridian.Error{Code: meridian.CodeInternal, Type: meridian.TypeAPI, Status: -1, Message: "x"}, 502},
+	} {
+		w := httptest.NewRecorder()
+		meridian.WriteError(w, tc.e)
 
-	if w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), `"api_error"`) {
+		if w.Code != tc.want || !strings.Contains(w.Body.String(), `"message":"`+tc.e.Message+`"`) || !strings.Contains(w.Body.String(), `"api_error"`) {
+			t.Errorf("%s: status %d body %s", tc.name, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestWriteErrorAnswersAForeignErrorAsInternal(t *testing.T) {
+	w := httptest.NewRecorder()
+	meridian.WriteError(w, errors.New("connection string is secret"))
+
+	if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "secret") || !strings.Contains(w.Body.String(), `"code":"internal"`) {
 		t.Fatalf("status %d body %s", w.Code, w.Body.String())
 	}
 }

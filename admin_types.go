@@ -123,8 +123,8 @@ func (k IssuedKey) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, k.Stri
 // LogValue redacts the secret for log/slog.
 func (k IssuedKey) LogValue() slog.Value { return slog.StringValue(k.String()) }
 
-// ModelAllowlist is the models a project may use.
-type ModelAllowlist struct {
+// modelAllowlist is the wire shape of a project's allowed models; the methods take and return a []string.
+type modelAllowlist struct {
 	Models []string `json:"models"`
 }
 

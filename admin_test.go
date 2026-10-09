@@ -355,6 +355,8 @@ func TestRepliesDecodeIntoTheHandWrittenTypes(t *testing.T) {
 		`{"id":"p1","ref":"web","name":"Web","org_id":"o1","status":"active","default_model":null,"created_at":"t"}`)})
 	e.On("GET", "/v1/orgs/o1/provider-credentials", fakeengine.Reply{Body: []byte(
 		`[{"provider":"gemini","hint":"…1234","created_at":"t","last_used_at":null,"policy":"prefer"}]`)})
+	e.On("GET", "/v1/orgs/o1/projects/p1/models", fakeengine.Reply{Body: []byte(`{"models":["m1","m2"]}`)})
+	e.On("PUT", "/v1/orgs/o1/projects/p1/models", fakeengine.Reply{Body: []byte(`{"models":["m3"]}`)})
 	e.On("GET", "/v1/models/m1", fakeengine.Reply{Body: []byte(
 		`{"id":"m1","provider":"google","capabilities":{"streaming":true,"tools":true,"vision":false,"json_output":true},
 		"context_tokens":1000,"max_output_tokens":100}`)})
@@ -386,6 +388,16 @@ func TestRepliesDecodeIntoTheHandWrittenTypes(t *testing.T) {
 	creds, err := a.ProviderCredentials.List(ctx, "o1")
 	if err != nil || len(creds) != 1 || creds[0].Policy != "prefer" || creds[0].LastUsedAt != nil {
 		t.Fatalf("credentials %+v err %v", creds, err)
+	}
+
+	allowed, err := a.ProjectModels.Get(ctx, "o1", "p1")
+	if err != nil || !slices.Equal(allowed, []string{"m1", "m2"}) {
+		t.Fatalf("allowlist %v err %v", allowed, err)
+	}
+
+	allowed, err = a.ProjectModels.Set(ctx, "o1", "p1", []string{"m3"})
+	if err != nil || !slices.Equal(allowed, []string{"m3"}) {
+		t.Fatalf("allowlist after set %v err %v", allowed, err)
 	}
 
 	model, err := a.Models.Get(ctx, "m1")
@@ -1176,7 +1188,13 @@ func TestAdminTypesConformToThePinnedSpec(t *testing.T) {
 	assertConforms(t, "KeyBody", meridian.Key{}, admin.KeyBody{})
 	assertConforms(t, "IssueKey", meridian.IssueKey{}, admin.IssueKey{})
 	assertConforms(t, "IssuedKey", meridian.IssuedKey{}, admin.IssuedKey{})
-	assertConforms(t, "ModelAllowlist", meridian.ModelAllowlist{}, admin.ModelAllowlist{})
+	// ModelAllowlist is unexported (the methods take and return a []string), so what pins its wire
+	// shape is the engine type: one list of strings called "models", which TestRequestBodies and
+	// TestRepliesDecodeIntoTheHandWrittenTypes hold the SDK to from both sides.
+	if fields := jsonFields(reflect.TypeOf(admin.ModelAllowlist{})); len(fields) != 1 || fields["models"].typ.Kind() != reflect.Slice {
+		t.Errorf("the engine's ModelAllowlist is no longer one \"models\" list: %v", fields)
+	}
+
 	assertConforms(t, "SetCredential", meridian.SetCredential{}, admin.SetCredential{})
 	assertConforms(t, "CredentialMetadata", meridian.CredentialMetadata{}, admin.CredentialMetadata{})
 	assertConforms(t, "CatalogueModelBody", meridian.CatalogueModel{}, admin.CatalogueModelBody{})

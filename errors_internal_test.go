@@ -49,8 +49,15 @@ func TestEnvelopeParsingAndStatus(t *testing.T) {
 		t.Fatal("rate_limited is retryable")
 	}
 
-	if !fromWire(&wireError{Code: "novel", Type: TypeAPI}, 503, "").Retryable {
-		t.Fatal("unknown code with 5xx is retryable")
+	// A code this SDK does not know fails closed: internal, never retried, the raw code kept apart.
+	// (The public tests pin this through the client; this is the decoder alone.)
+	e = fromWire(&wireError{Code: "novel", Type: TypeAPI, Message: "m"}, 503, "")
+	if e.Code != CodeInternal || e.EngineCode != "novel" || e.Retryable || e.Status != 503 || e.Message != "m" {
+		t.Fatalf("unknown code over HTTP: %+v", e)
+	}
+
+	if e = fromWire(&wireError{Code: "novel", Type: TypeAPI}, 0, ""); e.Status != 500 {
+		t.Fatalf("unknown code in a frame has the status of internal, got %+v", e)
 	}
 }
 

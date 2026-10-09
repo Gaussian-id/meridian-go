@@ -45,7 +45,7 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 	}
 
 	return send[ChatCompletion](ctx, s.tr(), call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
-		idempotencyKey: idem, policy: retryRetryable})
+		idempotencyKey: idem})
 }
 
 // Stream sends a chat request and returns the reply as a stream. Usage is always requested.
@@ -63,7 +63,7 @@ func (s *ChatService) Stream(ctx context.Context, p ChatParams) (*ChatStream, er
 	}
 
 	resp, err := s.tr().do(ctx, call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
-		accept: "text/event-stream", idempotencyKey: idem, policy: retryRetryable})
+		accept: "text/event-stream", idempotencyKey: idem})
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ type modelList struct {
 
 // List returns the models the key may use.
 func (s *ModelsService) List(ctx context.Context) ([]Model, error) {
-	list, err := send[modelList](ctx, s.tr(), call{method: http.MethodGet, path: "/v1/models", policy: retryRetryable})
+	list, err := send[modelList](ctx, s.tr(), call{method: http.MethodGet, path: "/v1/models"})
 	if err != nil {
 		return nil, err
 	}

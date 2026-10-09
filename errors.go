@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -23,6 +24,9 @@ type Error struct {
 	Retryable bool
 	// RequestID is the engine's request id, when known. Give it to Gaussian support.
 	RequestID string
+	// EngineCode is the engine's own code when this SDK does not recognise it (a newer engine);
+	// Code is then CodeInternal. Empty otherwise.
+	EngineCode string
 
 	cause error
 }
@@ -114,11 +118,29 @@ func parseEnvelope(body []byte) *wireError {
 	return env.Error
 }
 
+// knownTypes are the error types a decoded envelope may keep: the engine's five and the SDK's own.
+var knownTypes = []string{TypeInvalidRequest, TypeAuthentication, TypePermission, TypeRateLimit, TypeAPI, TypeClient}
+
 // fromWire builds an Error from an envelope. status 0 means "use the engine's status for the code".
+// What this SDK does not recognise fails closed: a code it does not know is internal (the raw
+// code is kept in EngineCode, never in Message) and is not retried, and a type it does not know
+// is api_error. A newer engine can add a code about the app's own account; it must not look like
+// something harmless or retryable.
 func fromWire(w *wireError, status int, headerID string) *Error {
-	_, known := engineStatus[w.Code]
+	// [1] Normalise the code and the type.
+	code, typ, engineCode := w.Code, w.Type, ""
+
+	if _, known := engineStatus[code]; !known {
+		code, engineCode = CodeInternal, w.Code
+	}
+
+	if !slices.Contains(knownTypes, typ) {
+		typ = TypeAPI
+	}
+
+	// [2] A stream frame has no HTTP status: take the engine's status for the (normalised) code.
 	if status == 0 {
-		status = engineStatus[w.Code]
+		status = engineStatus[code]
 	}
 
 	id := w.RequestID
@@ -126,13 +148,10 @@ func fromWire(w *wireError, status int, headerID string) *Error {
 		id = headerID
 	}
 
-	// An explicit "retryable": false turns retries off; true, null or any other value changes nothing.
-	retryable := retryableCodes[w.Code] || (!known && (status == http.StatusTooManyRequests || status >= 500))
-	if string(w.Retryable) == jsonFalse {
-		retryable = false
-	}
+	// [3] An explicit "retryable": false turns retries off; true, null or any other value changes nothing.
+	retryable := retryableCodes[code] && string(w.Retryable) != jsonFalse
 
-	return &Error{Code: w.Code, Type: w.Type, Status: status, Message: w.Message, RequestID: id, Retryable: retryable}
+	return &Error{Code: code, Type: typ, Status: status, Message: w.Message, RequestID: id, Retryable: retryable, EngineCode: engineCode}
 }
 
 // errorFromResponse decodes a failed response; a non-Meridian body is a network error.
@@ -157,9 +176,15 @@ func frame(e *Error) []byte {
 	return append(append([]byte("data: "), b...), '\n', '\n')
 }
 
-// WriteError answers an HTTP request with err as the engine's error envelope. An SDK
-// configuration error becomes a generic 500 so a browser never learns why the server is
-// misconfigured; network and cancellation errors become 502.
+// WriteError answers an HTTP request with err as the engine's error envelope: the error's own
+// code, message and request id, with its HTTP status (502 when it has none, as a network or
+// configuration error does, or when the status is not an error status). It hides nothing, and
+// the SDK-only type client_error is written as api_error. An error that is not a *Error is an
+// internal error with no detail.
+//
+// A route that a browser or an app calls must not show it why your server failed (a missing key,
+// an unreachable engine, your own account's credit): use package forward, which applies the
+// generic 503, or choose what to show yourself.
 func WriteError(w http.ResponseWriter, err error) {
 	// [1] Anything that isn't a *Error is an internal failure.
 	var e *Error
@@ -167,16 +192,10 @@ func WriteError(w http.ResponseWriter, err error) {
 		e = &Error{Code: CodeInternal, Type: TypeAPI, Status: http.StatusInternalServerError, Message: "Internal error."}
 	}
 
-	// [2] Pick the status and the public wording on a copy; toWire does the encoding.
-	pub := *e
-
-	switch {
-	case e.Type == TypeClient && e.Code == CodeInvalidRequest:
-		pub.Status, pub.Code, pub.Type, pub.Message = http.StatusInternalServerError, CodeInternal, TypeAPI, "The server is misconfigured."
-	case e.Code == CodeNetworkError || e.Code == CodeAborted:
-		pub.Status = http.StatusBadGateway
-	case pub.Status == 0:
-		pub.Status = http.StatusBadGateway
+	// [2] The error's status, or 502 for one that has none or is not an HTTP error status.
+	status := e.Status
+	if status < http.StatusBadRequest || status > 599 {
+		status = http.StatusBadGateway
 	}
 
 	// [3] Write the envelope.
@@ -186,8 +205,8 @@ func WriteError(w http.ResponseWriter, err error) {
 		w.Header().Set("X-Request-Id", e.RequestID)
 	}
 
-	w.WriteHeader(pub.Status)
+	w.WriteHeader(status)
 
-	body := toWire(&pub)
+	body := toWire(e)
 	_ = json.NewEncoder(w).Encode(envelope{Error: &body})
 }

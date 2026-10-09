@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"meridian.local/meridian-go"
 )
@@ -227,15 +228,18 @@ func relayStream(w http.ResponseWriter, r *http.Request, client *meridian.Client
 }
 
 // browserError is the one decision about what a browser may learn from a failure. The app's
-// own refusals (AppAccountCodes) and every SDK-side failure (client_error: configuration,
-// network, cancellation) become the generic 503, keeping only the request id. Anything else is
-// returned as is, the same pointer, so the stream hook can tell "pass through" from "replace".
+// own refusals (AppAccountCodes), every SDK-side failure (client_error: configuration, network,
+// cancellation) and every code the SDK does not recognise (EngineCode: a newer engine could have
+// added one about the app's own account) become the generic 503, keeping only the request id.
+// Anything else is returned as is, the same pointer, so the stream hook can tell "pass through"
+// from "replace". An error body or frame with no usable code never reaches here as an engine
+// error: the SDK reads it as a client_error.
 func browserError(e *meridian.Error) *meridian.Error {
 	if e == nil {
 		return unavailable("")
 	}
 
-	if e.Type == meridian.TypeClient || slices.Contains(appAccount, e.Code) {
+	if e.Type == meridian.TypeClient || e.EngineCode != "" || slices.Contains(appAccount, e.Code) {
 		return unavailable(e.RequestID)
 	}
 
@@ -292,6 +296,10 @@ func isJSON(contentType string) bool {
 	return (err == nil || errors.Is(err, mime.ErrInvalidMediaParameter)) && mt == "application/json"
 }
 
+// maxBodyDepth is how deeply a browser's JSON may nest: the body object is level 1, 64 levels are
+// allowed and 65 are refused (the rule meridian-python applies too).
+const maxBodyDepth = 64
+
 // readObject reads the bounded body as one JSON object.
 func readObject(r *http.Request) (map[string]json.RawMessage, *meridian.Error) {
 	// [1] The whole body, within the limit.
@@ -307,13 +315,51 @@ func readObject(r *http.Request) (map[string]json.RawMessage, *meridian.Error) {
 		return nil, badBody()
 	}
 
-	// [2] Exactly one JSON object, nothing after it.
+	// [2] UTF-8 only (encoding/json would turn a stray byte into U+FFFD and go on), and not
+	// nested deeper than the engine will take.
+	if !utf8.Valid(data) || nestingDepth(data) > maxBodyDepth {
+		return nil, badBody()
+	}
+
+	// [3] Exactly one JSON object, nothing after it.
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(data, &obj) != nil || obj == nil {
 		return nil, badBody()
 	}
 
 	return obj, nil
+}
+
+// nestingDepth is the deepest level of arrays and objects in a JSON text, counted over the bytes
+// without recursion so a hostile body cannot cost stack. Brackets inside strings do not count;
+// a backslash in a string skips the next byte, so an escaped quote does not end it. The count is
+// exact for valid JSON; anything else is refused by the parser afterwards.
+func nestingDepth(data []byte) int {
+	depth, deepest := 0, 0
+	inString, escaped := false, false
+
+	for _, b := range data {
+		switch {
+		case escaped:
+			escaped = false
+		case inString:
+			switch b {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+		case b == '"':
+			inString = true
+		case b == '{' || b == '[':
+			depth++
+			deepest = max(deepest, depth)
+		case b == '}' || b == ']':
+			depth--
+		}
+	}
+
+	return deepest
 }
 
 func badBody() *meridian.Error {

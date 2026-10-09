@@ -149,6 +149,17 @@ func TestAnErrorFrameEndsTheStreamWithTheEngineError(t *testing.T) {
 	}
 }
 
+func TestAnUnrecognisedCodeInAFrameFailsClosedAsInternal(t *testing.T) {
+	// A frame has no HTTP status, so the status is the one internal has: 500, not a guess from the new code.
+	s, _ := streamOf(t, fakeengine.Reply{Body: fakeengine.SSE(fakeengine.Chunk("a"), string(rawEnvelope("api_error", "brand_new")))})
+
+	_, err := s.Text()
+	if got := asError(t, err); got.Code != meridian.CodeInternal || got.EngineCode != "brand_new" || got.Type != meridian.TypeAPI ||
+		got.Status != 500 || got.Retryable || got.Message != "A new refusal." || got.RequestID != "req-n" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
 func TestAMalformedFrameIsANetworkErrorAndCancelsUpstream(t *testing.T) {
 	for _, bad := range []string{"not json", `{"id":"x"}`, `{"error":{"code":"insufficient_credit"}}`} {
 		s, e := streamOf(t, fakeengine.Reply{Body: fakeengine.SSE(bad), HangBody: true})

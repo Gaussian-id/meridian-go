@@ -102,14 +102,14 @@ func query(pairs ...string) url.Values {
 	return v
 }
 
-// get reads one resource. A read can be repeated, so it is retried like any retryable failure.
+// get reads one resource. A read can be repeated, so the transport retries it like any retryable failure.
 func get[T any](ctx context.Context, t *transport, template string, segments ...string) (*T, error) {
 	p, err := route(template, segments...)
 	if err != nil {
 		return nil, err
 	}
 
-	return send[T](ctx, t, call{method: http.MethodGet, path: p, policy: retryRetryable})
+	return send[T](ctx, t, call{method: http.MethodGet, path: p})
 }
 
 // list reads a collection.
@@ -122,25 +122,26 @@ func list[T any](ctx context.Context, t *transport, template string, segments ..
 	return *items, nil
 }
 
-// write sends a body. Whether the call may be repeated after the request might have reached the
-// engine is the caller's decision: retryRateLimitOnly unless a repeat is known to be harmless.
-func write[T any](ctx context.Context, t *transport, method string, policy retryPolicy, body any, template string, segments ...string) (*T, error) {
+// write sends a body with a POST, PUT or PATCH. The transport repeats it after a failure that
+// might have reached the engine only when it is a rate limit (the request never ran), because a
+// repeat could do the work twice. An operation that is known to be safe to repeat sends its own call.
+func write[T any](ctx context.Context, t *transport, method string, body any, template string, segments ...string) (*T, error) {
 	p, err := route(template, segments...)
 	if err != nil {
 		return nil, err
 	}
 
-	return send[T](ctx, t, call{method: method, path: p, body: body, policy: policy})
+	return send[T](ctx, t, call{method: method, path: p, body: body})
 }
 
-// del deletes a resource; the engine answers 204. A repeat finds nothing to do, so it is retried.
+// del deletes a resource; the engine answers 204. A repeat finds nothing to do, so the transport retries it.
 func del(ctx context.Context, t *transport, template string, segments ...string) error {
 	p, err := route(template, segments...)
 	if err != nil {
 		return err
 	}
 
-	if _, err := send[struct{}](ctx, t, call{method: http.MethodDelete, path: p, policy: retryRetryable, noContent: true}); err != nil {
+	if _, err := send[struct{}](ctx, t, call{method: http.MethodDelete, path: p, noContent: true}); err != nil {
 		return err
 	}
 
@@ -166,12 +167,9 @@ func (s *Organisations) List(ctx context.Context) ([]Organisation, error) {
 // Create creates an organisation. With an ExternalReference a repeat returns the existing one,
 // so only then is the call retried after a failure that might have reached the engine.
 func (s *Organisations) Create(ctx context.Context, in CreateOrganisation) (*Organisation, error) {
-	policy := retryRateLimitOnly
-	if in.ExternalReference != nil && strings.TrimSpace(*in.ExternalReference) != "" {
-		policy = retryRetryable
-	}
+	repeatable := in.ExternalReference != nil && strings.TrimSpace(*in.ExternalReference) != ""
 
-	return write[Organisation](ctx, s.tr(), http.MethodPost, policy, in, "/v1/orgs")
+	return send[Organisation](ctx, s.tr(), call{method: http.MethodPost, path: "/v1/orgs", body: in, repeatable: repeatable})
 }
 
 // Get returns an organisation by id.
@@ -202,7 +200,7 @@ func (s *Projects) List(ctx context.Context, org string) ([]Project, error) {
 
 // Create creates a project. It is retried only when the engine rate-limits it.
 func (s *Projects) Create(ctx context.Context, org string, in CreateProject) (*Project, error) {
-	return write[Project](ctx, s.tr(), http.MethodPost, retryRateLimitOnly, in, "/v1/orgs/%s/projects", org)
+	return write[Project](ctx, s.tr(), http.MethodPost, in, "/v1/orgs/%s/projects", org)
 }
 
 // Get returns a project.
@@ -216,7 +214,7 @@ func (s *Projects) Update(ctx context.Context, org, project string, in UpdatePro
 		return nil, configError("UpdateProject cannot both set and clear DefaultModel.")
 	}
 
-	return write[Project](ctx, s.tr(), http.MethodPatch, retryRateLimitOnly, in, "/v1/orgs/%s/projects/%s", org, project)
+	return write[Project](ctx, s.tr(), http.MethodPatch, in, "/v1/orgs/%s/projects/%s", org, project)
 }
 
 // Delete deletes a project.
@@ -243,7 +241,7 @@ func (s *Keys) List(ctx context.Context, org, project string) ([]Key, error) {
 // Issue issues a key and returns its secret once: store IssuedKey.APIKey now. It is retried only
 // when the engine rate-limits it, so a dropped connection never makes a second key.
 func (s *Keys) Issue(ctx context.Context, org, project string, in IssueKey) (*IssuedKey, error) {
-	return write[IssuedKey](ctx, s.tr(), http.MethodPost, retryRateLimitOnly, in, "/v1/orgs/%s/projects/%s/keys", org, project)
+	return write[IssuedKey](ctx, s.tr(), http.MethodPost, in, "/v1/orgs/%s/projects/%s/keys", org, project)
 }
 
 // Revoke revokes a key.
@@ -269,7 +267,7 @@ func (s *ProviderCredentials) List(ctx context.Context, org string) ([]Credentia
 
 // Set stores or replaces the organisation's key for a provider, such as "gemini".
 func (s *ProviderCredentials) Set(ctx context.Context, org, provider string, in SetCredential) (*CredentialMetadata, error) {
-	return write[CredentialMetadata](ctx, s.tr(), http.MethodPut, retryRateLimitOnly, in, "/v1/orgs/%s/provider-credentials/%s", org, provider)
+	return write[CredentialMetadata](ctx, s.tr(), http.MethodPut, in, "/v1/orgs/%s/provider-credentials/%s", org, provider)
 }
 
 // Delete removes the organisation's key for a provider.
@@ -290,7 +288,7 @@ func (s *ProjectModels) tr() *transport {
 
 // Get returns the project's allowed models.
 func (s *ProjectModels) Get(ctx context.Context, org, project string) ([]string, error) {
-	allowed, err := get[ModelAllowlist](ctx, s.tr(), "/v1/orgs/%s/projects/%s/models", org, project)
+	allowed, err := get[modelAllowlist](ctx, s.tr(), "/v1/orgs/%s/projects/%s/models", org, project)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +302,7 @@ func (s *ProjectModels) Set(ctx context.Context, org, project string, models []s
 		models = []string{} // the engine wants a list, not null
 	}
 
-	allowed, err := write[ModelAllowlist](ctx, s.tr(), http.MethodPut, retryRateLimitOnly, ModelAllowlist{Models: models},
+	allowed, err := write[modelAllowlist](ctx, s.tr(), http.MethodPut, modelAllowlist{Models: models},
 		"/v1/orgs/%s/projects/%s/models", org, project)
 	if err != nil {
 		return nil, err
@@ -351,7 +349,7 @@ func (s *Analytics) Usage(ctx context.Context, q UsageQuery) (*UsageReport, erro
 		return nil, configError("UsageQuery.ProjectID is required.")
 	}
 
-	return send[UsageReport](ctx, s.tr(), call{method: http.MethodGet, path: "/v1/analytics/usage", policy: retryRetryable,
+	return send[UsageReport](ctx, s.tr(), call{method: http.MethodGet, path: "/v1/analytics/usage",
 		query: query("project_id", q.ProjectID, "from", q.From, "to", q.To)})
 }
 
@@ -377,6 +375,6 @@ func (s *Logs) List(ctx context.Context, q LogsQuery) (*LogPage, error) {
 		size = strconv.Itoa(q.PageSize)
 	}
 
-	return send[LogPage](ctx, s.tr(), call{method: http.MethodGet, path: "/v1/logs", policy: retryRetryable,
+	return send[LogPage](ctx, s.tr(), call{method: http.MethodGet, path: "/v1/logs",
 		query: query("project_id", q.ProjectID, "page_size", size, "cursor", q.Cursor)})
 }
