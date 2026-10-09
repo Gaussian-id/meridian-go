@@ -471,12 +471,16 @@ func TestAQueryWithoutAProjectIsRefusedWithoutSending(t *testing.T) {
 	}
 }
 
-// segmentOps is every operation that takes a path parameter, each called with the segments it is given.
-var segmentOps = []struct {
+// segmentOp is one operation that takes path ids, called with the segments it is given.
+type segmentOp struct {
 	name string
 	n    int
 	call func(ctx context.Context, a *meridian.AdminClient, s []string) error
-}{
+}
+
+// segmentOps is every operation that takes a path id; TestEveryMethodWithAPathIDIsInTheSegmentTable
+// holds it to the methods the client really has.
+var segmentOps = []segmentOp{
 	{"Organisations.Get", 1, func(c context.Context, a *meridian.AdminClient, s []string) error {
 		_, err := a.Organisations.Get(c, s[0])
 		return err
@@ -540,9 +544,74 @@ var segmentOps = []struct {
 	}},
 }
 
+// noPathID are the admin methods that take no resource id, so there is nothing to refuse.
+var noPathID = []string{"Organisations.List", "Organisations.Create", "Models.List", "Analytics.Usage", "Logs.List"}
+
+// notOrgID are the methods whose first path id is not an organisation id; every other method that
+// takes an id starts with the organisation, whose route also has a "by-reference" sibling.
+var notOrgID = []string{"Organisations.GetByReference", "Models.Get"}
+
+func TestEveryMethodWithAPathIDIsInTheSegmentTable(t *testing.T) {
+	// [1] Every admin method, read off the client by reflection, with its number of string ids.
+	reflected := map[string]int{}
+	client := reflect.TypeOf(meridian.AdminClient{})
+
+	for i := range client.NumField() {
+		service := client.Field(i).Type
+
+		for m := range service.NumMethod() {
+			sig := service.Method(m).Type
+			ids := 0
+
+			for in := 1; in < sig.NumIn(); in++ { // 0 is the receiver
+				if sig.In(in).Kind() == reflect.String {
+					ids++
+				}
+			}
+
+			reflected[client.Field(i).Name+"."+service.Method(m).Name] = ids
+		}
+	}
+
+	// [2] The exemptions are real methods without an id, so a stale entry cannot hide a gap.
+	for _, name := range noPathID {
+		if ids, ok := reflected[name]; !ok || ids != 0 {
+			t.Errorf("%s is listed as taking no id; reflected: exists %v, string ids %d", name, ok, ids)
+		}
+
+		delete(reflected, name)
+	}
+
+	// [3] What is left is exactly the table, with the right number of ids.
+	for _, op := range segmentOps {
+		ids, ok := reflected[op.name]
+		if !ok || ids != op.n {
+			t.Errorf("segmentOps has %s with %d ids; reflected: exists %v, string ids %d", op.name, op.n, ok, ids)
+		}
+
+		delete(reflected, op.name)
+	}
+
+	for name := range reflected {
+		t.Errorf("%s takes an id and is missing from segmentOps", name)
+	}
+
+	for _, name := range notOrgID {
+		if !slices.ContainsFunc(segmentOps, func(op segmentOp) bool { return op.name == name }) {
+			t.Errorf("notOrgID names %s, which is not in segmentOps", name)
+		}
+	}
+}
+
+// unsafeSegments: empty, all white space, a dot segment, and a dot segment spelled with percent-encoded dots.
+var unsafeSegments = []string{"", " ", "\t", ".", "..", "%2e", "%2E", "%2e%2E", "%2E.", ".%2e"}
+
 func TestUnsafePathSegmentsAreRefusedWithoutSending(t *testing.T) {
-	// Empty, all white space, a dot segment, and a dot segment spelled with percent-encoded dots.
-	for _, bad := range []string{"", " ", "\t", ".", "..", "%2e", "%2E", "%2e%2E", "%2E.", ".%2e"} {
+	// The message seen for each operation and position. It must be the same whatever the segment
+	// was, which is how it is known never to echo it.
+	messages := map[string]string{}
+
+	for _, bad := range unsafeSegments {
 		e := fakeengine.New()
 		a := newAdmin(e)
 
@@ -556,12 +625,88 @@ func TestUnsafePathSegmentsAreRefusedWithoutSending(t *testing.T) {
 				if got.Code != meridian.CodeInvalidRequest || got.Type != meridian.TypeClient || got.Retryable {
 					t.Errorf("%s(%q at %d): got %+v", op.name, bad, pos, got)
 				}
+
+				key := fmt.Sprintf("%s at %d", op.name, pos)
+				if first, seen := messages[key]; !seen {
+					messages[key] = got.Message
+				} else if got.Message != first {
+					t.Errorf("%s(%q): message %q differs from %q: it must not depend on, so never echo, the segment", key, bad, got.Message, first)
+				}
 			}
 		}
 
 		if n := len(e.Requests()); n != 0 {
 			t.Errorf("%q: sent %d requests", bad, n)
 		}
+	}
+}
+
+func TestAnOrganisationIdOfByReferenceIsRefusedWithoutSending(t *testing.T) {
+	// "by-reference" in the organisation position would make the engine's router answer another
+	// route (GET /v1/orgs/by-reference/projects is orgs_by_reference, not projects_list). Spelled
+	// with a percent-encoded letter or hyphen, it is the same segment after one decode.
+	spellings := []string{"by-reference", "%62y-reference", "by%2Dreference", "%62%79%2d%72eference"}
+	messages := map[string]string{}
+
+	e := fakeengine.New()
+	a := newAdmin(e)
+
+	for _, bad := range spellings {
+		for _, op := range segmentOps {
+			if slices.Contains(notOrgID, op.name) {
+				continue
+			}
+
+			segs := slices.Repeat([]string{"ok"}, op.n)
+			segs[0] = bad
+
+			got := asError(t, op.call(context.Background(), a, segs))
+			if got.Code != meridian.CodeInvalidRequest || got.Type != meridian.TypeClient || got.Retryable {
+				t.Errorf("%s(%q): got %+v", op.name, bad, got)
+			}
+
+			if first, seen := messages[op.name]; !seen {
+				messages[op.name] = got.Message
+			} else if got.Message != first {
+				t.Errorf("%s(%q): message %q differs from %q: it must not echo the segment", op.name, bad, got.Message, first)
+			}
+		}
+	}
+
+	if n := len(e.Requests()); n != 0 {
+		t.Fatalf("sent %d requests", n)
+	}
+}
+
+func TestByReferenceIsAnOrdinaryIdWhereItCannotShadowARoute(t *testing.T) {
+	// Only the organisation position is reserved: it is a fine reference, project, key or model id.
+	e := fakeengine.New()
+	for _, path := range []string{"/v1/orgs/by-reference/by-reference", "/v1/orgs/o1/projects/by-reference", "/v1/models/by-reference"} {
+		e.On("GET", path, fakeengine.Reply{Body: []byte(`{}`)})
+	}
+
+	e.On("DELETE", "/v1/orgs/o1/projects/p1/keys/by-reference", fakeengine.Reply{Status: 204})
+
+	ctx, a := context.Background(), newAdmin(e)
+
+	if _, err := a.Organisations.GetByReference(ctx, "by-reference"); err != nil {
+		t.Errorf("GetByReference: %v", err)
+	}
+
+	if _, err := a.Projects.Get(ctx, "o1", "by-reference"); err != nil {
+		t.Errorf("Projects.Get: %v", err)
+	}
+
+	if err := a.Keys.Revoke(ctx, "o1", "p1", "by-reference"); err != nil {
+		t.Errorf("Keys.Revoke: %v", err)
+	}
+
+	if _, err := a.Models.Get(ctx, "by-reference"); err != nil {
+		t.Errorf("Models.Get: %v", err)
+	}
+
+	if n := len(e.Requests()); n != 4 {
+		t.Fatalf("sent %d requests, want 4", n)
 	}
 }
 
@@ -686,6 +831,104 @@ func TestReadsDeletesAndAnOrganisationWithAReferenceAreRetried(t *testing.T) {
 	}
 }
 
+func TestNoContentAndNullRepliesAreNeverSuccess(t *testing.T) {
+	// A 204 is for the operations that expect no content, and a literal null is nothing to decode:
+	// neither may come back as an empty value with a nil error (an empty IssuedKey would be stored
+	// as a secret). Both are a network_error that keeps the HTTP status, and neither is retried.
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name, method, path string
+		call               func(e *fakeengine.Engine) error
+	}{
+		{"Chat.Create", "POST", "/v1/chat/completions", func(e *fakeengine.Engine) error {
+			_, err := newClient(e).Chat.Create(ctx, hello())
+			return err
+		}},
+		{"Models.List", "GET", "/v1/models", func(e *fakeengine.Engine) error {
+			_, err := newClient(e).Models.List(ctx)
+			return err
+		}},
+		{"Keys.Issue", "POST", "/v1/orgs/o1/projects/p1/keys", func(e *fakeengine.Engine) error {
+			_, err := newAdmin(e).Keys.Issue(ctx, "o1", "p1", meridian.IssueKey{})
+			return err
+		}},
+		{"Organisations.Get", "GET", "/v1/orgs/o1", func(e *fakeengine.Engine) error {
+			_, err := newAdmin(e).Organisations.Get(ctx, "o1")
+			return err
+		}},
+		{"Organisations.List", "GET", "/v1/orgs", func(e *fakeengine.Engine) error {
+			_, err := newAdmin(e).Organisations.List(ctx)
+			return err
+		}},
+		{"ProjectModels.Get", "GET", "/v1/orgs/o1/projects/p1/models", func(e *fakeengine.Engine) error {
+			_, err := newAdmin(e).ProjectModels.Get(ctx, "o1", "p1")
+			return err
+		}},
+	} {
+		for _, reply := range []fakeengine.Reply{
+			{Status: 204},
+			{Status: 200, Body: []byte(`null`)},
+			{Status: 201, Body: []byte(" null\n")},
+		} {
+			e := fakeengine.New()
+			e.On(tc.method, tc.path, reply)
+
+			got := asError(t, tc.call(e))
+			if got.Code != meridian.CodeNetworkError || got.Type != meridian.TypeClient || got.Status != max(reply.Status, 200) || got.Retryable {
+				t.Errorf("%s answered %d %q: got %+v", tc.name, reply.Status, reply.Body, got)
+			}
+
+			if n := len(e.Requests()); n != 1 {
+				t.Errorf("%s answered %d %q: sent %d requests, want 1", tc.name, reply.Status, reply.Body, n)
+			}
+		}
+	}
+}
+
+func TestADeleteExpectsNoContent(t *testing.T) {
+	// The engine answers every DELETE with 204 (the pinned document has no other success status).
+	// A 200 that carries a JSON object is still taken as done, as it always was; a literal null,
+	// like any other reply, is not.
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		reply fakeengine.Reply
+		want  string // the error code, or "" for success
+	}{
+		{"204", fakeengine.Reply{Status: 204}, ""},
+		{"200 with an object", fakeengine.Reply{Status: 200, Body: []byte(`{"deleted":true}`)}, ""},
+		{"200 with null", fakeengine.Reply{Status: 200, Body: []byte(`null`)}, meridian.CodeNetworkError},
+		{"200 with no body", fakeengine.Reply{Status: 200}, meridian.CodeNetworkError},
+	} {
+		e := fakeengine.New()
+		e.On("DELETE", "/v1/orgs/o1/projects/p1/keys/k1", tc.reply)
+		e.On("DELETE", "/v1/orgs/o1/projects/p1", tc.reply)
+		e.On("DELETE", "/v1/orgs/o1/provider-credentials/gemini", tc.reply)
+
+		a := newAdmin(e)
+
+		for name, err := range map[string]error{
+			"Keys.Revoke":                a.Keys.Revoke(ctx, "o1", "p1", "k1"),
+			"Projects.Delete":            a.Projects.Delete(ctx, "o1", "p1"),
+			"ProviderCredentials.Delete": a.ProviderCredentials.Delete(ctx, "o1", "gemini"),
+		} {
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("%s answered %s: %v", name, tc.name, err)
+				}
+
+				continue
+			}
+
+			if got := asError(t, err); got.Code != tc.want {
+				t.Errorf("%s answered %s: got %+v", name, tc.name, got)
+			}
+		}
+	}
+}
+
 func TestEngineErrorsComeBackAsMeridianErrors(t *testing.T) {
 	e := fakeengine.New()
 	e.On("GET", "/v1/orgs/o9", fakeengine.Reply{Status: 404, Body: fakeengine.Envelope("not_found", "No such organisation.", "req-7")})
@@ -795,7 +1038,7 @@ func TestNoPriceOrCostIsExportedOrReturned(t *testing.T) {
 	}
 }
 
-func TestSecretsPrintRedacted(t *testing.T) {
+func TestSecretsPrintRedactedUnderEveryVerb(t *testing.T) {
 	secret := "gmr_" + strings.Repeat("a", 64)
 
 	issued := meridian.IssuedKey{KeyID: "k1", APIKey: secret, KeyPrefix: "gmr_aaaa"}
@@ -806,6 +1049,13 @@ func TestSecretsPrintRedacted(t *testing.T) {
 		Cred meridian.SetCredential
 	}
 
+	// Every verb that formats a value, whatever its kind: strings, bytes, numbers, booleans,
+	// floats, runes, with flags and widths. (%p of a value and %w of a non-error are not here:
+	// fmt rejects them as misused and prints the raw value without calling any method; go vet
+	// reports both.)
+	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%t", "%e", "%E", "%f", "%g", "%b", "%c", "%U", "%o", "%O",
+		"%8.3v", "%-12s", "%+d", "%#x", "%08d", "% x"}
+
 	for name, v := range map[string]any{
 		"IssuedKey":      issued,
 		"*IssuedKey":     &issued,
@@ -815,28 +1065,75 @@ func TestSecretsPrintRedacted(t *testing.T) {
 		"in a slice":     []meridian.IssuedKey{issued},
 		"in a map":       map[string]meridian.SetCredential{"k": credential},
 	} {
-		for _, f := range []string{"%v", "%+v", "%s", "%#v", "%q", "%x"} {
-			out := fmt.Sprintf(f, v)
-			if strings.Contains(out, secret) || strings.Contains(out, fmt.Sprintf("%x", secret)) {
-				t.Errorf("%s printed its secret with %s: %s", name, f, out)
+		outs := []string{fmt.Sprint(v), fmt.Sprintln(v), fmt.Errorf("wrapped: %v", v).Error()}
+		for _, f := range verbs {
+			outs = append(outs, fmt.Sprintf(f, v))
+		}
+
+		for _, out := range outs {
+			if strings.Contains(out, secret) || strings.Contains(out, fmt.Sprintf("%x", secret)) || strings.Contains(out, fmt.Sprint([]byte(secret))) {
+				t.Errorf("%s printed its secret: %s", name, out)
 			}
 		}
 	}
 
-	// Structured logs too: slog's JSON handler would otherwise marshal the struct.
-	var buf bytes.Buffer
+	// A direct slog attribute too, with either handler.
+	for name, newHandler := range map[string]func(*bytes.Buffer) slog.Handler{
+		"text": func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) },
+		"JSON": func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) },
+	} {
+		var buf bytes.Buffer
 
-	log := slog.New(slog.NewJSONHandler(&buf, nil))
-	log.Info("issued", "key", issued, "credential", credential)
-	log.Info("issued", slog.Any("key", &issued))
+		log := slog.New(newHandler(&buf))
+		log.Info("issued", "key", issued, "credential", credential)
+		log.Info("issued", slog.Any("key", &issued), slog.Any("credential", &credential))
 
-	if strings.Contains(buf.String(), secret) {
-		t.Errorf("slog logged the secret: %s", buf.String())
+		if strings.Contains(buf.String(), secret) || !strings.Contains(buf.String(), "redacted") {
+			t.Errorf("%s handler logged %s", name, buf.String())
+		}
 	}
 
 	// The fields stay usable: redaction is only for printing.
 	if issued.APIKey != secret || credential.Credential != secret {
 		t.Fatal("the secret fields must keep their values")
+	}
+}
+
+func TestJSONEncodingCarriesTheSecretOnPurpose(t *testing.T) {
+	// Returning a newly issued key to its owner is the point of Keys.Issue, so encoding/json is
+	// not redacted (json.NewEncoder(w).Encode(issued) must work). The docs say so; this holds them to it.
+	secret := "gmr_" + strings.Repeat("b", 64)
+
+	issued, err := json.Marshal(meridian.IssuedKey{KeyID: "k1", APIKey: secret})
+	if err != nil || !strings.Contains(string(issued), `"api_key":"`+secret+`"`) {
+		t.Fatalf("IssuedKey marshalled to %s (%v), want the api_key", issued, err)
+	}
+
+	credential, err := json.Marshal(meridian.SetCredential{Credential: secret})
+	if err != nil || !strings.Contains(string(credential), `"credential":"`+secret+`"`) {
+		t.Fatalf("SetCredential marshalled to %s (%v), want the credential", credential, err)
+	}
+
+	// And it round-trips: a stored or relayed reply decodes back into the same key.
+	var back meridian.IssuedKey
+	if err := json.Unmarshal(issued, &back); err != nil || back.APIKey != secret {
+		t.Fatalf("decoded %+v (%v)", back, err)
+	}
+}
+
+func TestUpdateProjectRefusesAValueAndAClearTogether(t *testing.T) {
+	e := fakeengine.New()
+	e.On("PATCH", "/v1/orgs/o1/projects/p1", fakeengine.Reply{Body: []byte(`{}`)})
+
+	project, err := newAdmin(e).Projects.Update(context.Background(), "o1", "p1",
+		meridian.UpdateProject{DefaultModel: str("m1"), ClearDefaultModel: true})
+
+	if got := asError(t, err); project != nil || got.Code != meridian.CodeInvalidRequest || got.Type != meridian.TypeClient || got.Retryable {
+		t.Fatalf("project %v got %+v", project, got)
+	}
+
+	if n := len(e.Requests()); n != 0 {
+		t.Fatalf("sent %d requests", n)
 	}
 }
 

@@ -37,13 +37,21 @@ func TestSendDecodesTheReplyAndHandsOverTheRequestID(t *testing.T) {
 	}
 }
 
-func TestSendGivesAZeroReplyForNoContent(t *testing.T) {
+func TestSendGivesAZeroReplyForNoContentOnlyWhenTheCallExpectsIt(t *testing.T) {
 	e := fakeengine.New()
 	e.On("DELETE", "/x", fakeengine.Reply{Status: 204})
 
-	got, err := send[struct{ Name string }](context.Background(), testTransport(e), call{method: http.MethodDelete, path: "/x"})
+	got, err := send[struct{ Name string }](context.Background(), testTransport(e), call{method: http.MethodDelete, path: "/x", noContent: true})
 	if err != nil || got == nil || got.Name != "" {
 		t.Fatalf("a 204 must give a zero reply and no error, got %+v err %v", got, err)
+	}
+
+	// Any other call has no use for an empty reply.
+	got, err = send[struct{ Name string }](context.Background(), testTransport(e), call{method: http.MethodDelete, path: "/x"})
+
+	var me *Error
+	if got != nil || !errors.As(err, &me) || me.Code != CodeNetworkError || me.Status != 204 {
+		t.Fatalf("an unexpected 204 must be a network_error, got %+v err %v", got, err)
 	}
 }
 

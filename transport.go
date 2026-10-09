@@ -35,6 +35,7 @@ type call struct {
 	accept         string
 	idempotencyKey string
 	policy         retryPolicy
+	noContent      bool // the operation answers 204 with no body (a DELETE); no other call accepts a 204
 }
 
 type transport struct {
@@ -108,9 +109,13 @@ func (t *transport) refuse() *Error {
 
 // do sends one logical call and returns a response whose body the caller must close.
 func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
-	// [1] A refused, nil or zero-value transport sends nothing.
+	// [1] A refused, nil or zero-value transport, or a nil context, sends nothing.
 	if refusal := t.refuse(); refusal != nil {
 		return nil, refusal
+	}
+
+	if ctx == nil {
+		return nil, configError("The context must not be nil.")
 	}
 
 	// [2] Encode the body once; every attempt resends the same bytes.
@@ -326,10 +331,12 @@ var maxReplyBytes int64 = 64 << 20
 // requestIDSetter is implemented by a reply type that carries the engine's request id.
 type requestIDSetter interface{ setRequestID(string) }
 
-// send runs one call and decodes its JSON reply into a new T; a 204 gives a zero T. It is the
-// one place a buffered reply is read, size-capped and decoded, so every reply fails the same way:
-// a body that is cut off, too large or not the expected JSON is a network_error that never
-// quotes the body (it may hold a secret, such as an issued key).
+// send runs one call and decodes its JSON reply into a new T. It is the one place a buffered
+// reply is read, size-capped and decoded, so every reply fails the same way: a 204 for a call
+// that does not expect one (c.noContent gives a zero T), a literal null, and a body that is cut
+// off, too large or not the expected JSON are all a network_error, never an empty T with a nil
+// error. The error's Message never quotes the body (it may hold a secret, such as an issued
+// key); its wrapped cause is the decoder's own error, which can name a field or a byte.
 func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 	// [1] Ask for JSON unless the caller wants something else.
 	if c.accept == "" {
@@ -344,10 +351,15 @@ func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 
 	defer resp.Body.Close()
 
-	// [3] Read the body, unless the engine said there is none.
+	// [3] Read the body. Only a call that expects no content may get a 204.
 	var out T
 
-	if resp.StatusCode != http.StatusNoContent {
+	switch {
+	case resp.StatusCode == http.StatusNoContent && c.noContent:
+		// Nothing to read: the zero T is the answer.
+	case resp.StatusCode == http.StatusNoContent:
+		return nil, networkError(resp.StatusCode, "The engine answered with no content, which this call does not expect.", nil)
+	default:
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, maxReplyBytes+1))
 		if rerr != nil {
 			if ctx.Err() != nil {
@@ -359,6 +371,11 @@ func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 
 		if int64(len(data)) > maxReplyBytes {
 			return nil, networkError(resp.StatusCode, "The engine's reply was larger than the SDK accepts.", nil)
+		}
+
+		// json.Unmarshal takes null as "nothing to set", which would leave a zero T.
+		if string(bytes.TrimSpace(data)) == "null" {
+			return nil, networkError(resp.StatusCode, "The engine's reply was empty (JSON null).", nil)
 		}
 
 		if jerr := json.Unmarshal(data, &out); jerr != nil {

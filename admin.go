@@ -48,11 +48,21 @@ func NewAdminClient(baseURL, key string, opts ...Option) *AdminClient {
 	}
 }
 
+// orgRoutePrefix starts every template whose first id is an organisation id.
+const orgRoutePrefix = "/v1/orgs/%s"
+
+// reservedOrgID is the engine's route for looking an organisation up by your reference
+// (/v1/orgs/by-reference/{reference}); as an organisation id it would shadow that route.
+const reservedOrgID = "by-reference"
+
 // route fills a path template (one %s per segment) with escaped segments. A segment that is
 // empty, all white space, "." or ".." (as given, or after one percent-decode) is refused, so no
-// id can climb to or collapse into another resource's route. The message never echoes it.
+// id can climb to or collapse into another resource's route; so is an organisation id of
+// "by-reference", which the engine would route to the lookup by reference instead of to the
+// organisation's own resource. The messages never echo the segment.
 func route(template string, segments ...string) (string, error) {
 	escaped := make([]any, len(segments))
+	orgFirst := strings.HasPrefix(template, orgRoutePrefix)
 
 	for i, s := range segments {
 		// [1] Look at the segment as given and after one percent-decode (%2e%2e is "..").
@@ -63,8 +73,11 @@ func route(template string, segments ...string) (string, error) {
 
 		// [2] Refuse what would reach another route; nothing is sent.
 		for _, candidate := range []string{s, decoded} {
-			if strings.TrimSpace(candidate) == "" || candidate == "." || candidate == ".." {
+			switch {
+			case strings.TrimSpace(candidate) == "" || candidate == "." || candidate == "..":
 				return "", configError(`A resource id must not be empty, white space, "." or "..".`)
+			case i == 0 && orgFirst && candidate == reservedOrgID:
+				return "", configError(`"` + reservedOrgID + `" cannot be an organisation id: the engine uses it for the lookup by reference.`)
 			}
 		}
 
@@ -127,7 +140,7 @@ func del(ctx context.Context, t *transport, template string, segments ...string)
 		return err
 	}
 
-	if _, err := send[struct{}](ctx, t, call{method: http.MethodDelete, path: p, policy: retryRetryable}); err != nil {
+	if _, err := send[struct{}](ctx, t, call{method: http.MethodDelete, path: p, policy: retryRetryable, noContent: true}); err != nil {
 		return err
 	}
 
@@ -199,6 +212,10 @@ func (s *Projects) Get(ctx context.Context, org, project string) (*Project, erro
 
 // Update changes one project field: its name, its status or its default model.
 func (s *Projects) Update(ctx context.Context, org, project string, in UpdateProject) (*Project, error) {
+	if in.DefaultModel != nil && in.ClearDefaultModel {
+		return nil, configError("UpdateProject cannot both set and clear DefaultModel.")
+	}
+
 	return write[Project](ctx, s.tr(), http.MethodPatch, retryRateLimitOnly, in, "/v1/orgs/%s/projects/%s", org, project)
 }
 

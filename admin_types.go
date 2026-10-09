@@ -2,6 +2,8 @@ package meridian
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 )
 
@@ -46,7 +48,8 @@ type CreateProject struct {
 }
 
 // UpdateProject changes exactly one of Name, Status ("active" or "suspended") or DefaultModel.
-// Set ClearDefaultModel to clear the default model (the engine reads JSON null as "clear").
+// Set ClearDefaultModel to clear the default model (the engine reads JSON null as "clear");
+// setting it together with DefaultModel is refused as an invalid_request.
 type UpdateProject struct {
 	Name              *string `json:"name,omitempty"`
 	Status            *string `json:"status,omitempty"`
@@ -93,7 +96,15 @@ type IssueKey struct {
 }
 
 // IssuedKey is a new key. APIKey is the secret: the engine shows it once, so store it now.
-// It prints redacted with %v, %+v, %s and %#v, and in structured logs.
+//
+// It is redacted under every fmt verb (%v, %+v, %#v, %s, %q, %x, %d and the rest) and as a
+// direct log/slog attribute (slog.Any("key", issued)). It is NOT redacted by encoding/json, on
+// purpose: handing a new key back to its owner is the point of Keys.Issue, so
+// json.NewEncoder(w).Encode(issued) carries APIKey. A struct, slice or map that holds an
+// IssuedKey is marshalled by encoding/json too, so slog's JSON handler logs the secret from one:
+// do not log a struct that holds an IssuedKey with a JSON handler; log KeyID and KeyPrefix.
+// (fmt prints a misused operand raw, without calling any method: a value given to %p and a
+// non-error given to %w. go vet reports both.)
 type IssuedKey struct {
 	KeyID     string `json:"key_id"`
 	APIKey    string `json:"api_key"`
@@ -106,8 +117,8 @@ func (k IssuedKey) String() string {
 	return "IssuedKey{KeyID:" + k.KeyID + " KeyPrefix:" + k.KeyPrefix + " APIKey:[redacted]}"
 }
 
-// GoString redacts the secret for %#v.
-func (k IssuedKey) GoString() string { return k.String() }
+// Format prints the redacted form under every fmt verb, so no verb reaches the secret.
+func (k IssuedKey) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, k.String()) }
 
 // LogValue redacts the secret for log/slog.
 func (k IssuedKey) LogValue() slog.Value { return slog.StringValue(k.String()) }
@@ -118,8 +129,11 @@ type ModelAllowlist struct {
 }
 
 // SetCredential stores an organisation's own provider key (BYOK). Policy is "prefer" or
-// "require"; leave it nil for the engine's default. It prints redacted with %v, %+v, %s and
-// %#v, and in structured logs.
+// "require"; leave it nil for the engine's default.
+//
+// Like IssuedKey it is redacted under every fmt verb and as a direct log/slog attribute, and NOT
+// redacted by encoding/json (the request body needs the credential). Do not log a struct that
+// holds a SetCredential with slog's JSON handler.
 type SetCredential struct {
 	Credential string  `json:"credential"`
 	Policy     *string `json:"policy,omitempty"`
@@ -128,8 +142,8 @@ type SetCredential struct {
 // String redacts the credential.
 func (c SetCredential) String() string { return "SetCredential{Credential:[redacted]}" }
 
-// GoString redacts the credential for %#v.
-func (c SetCredential) GoString() string { return c.String() }
+// Format prints the redacted form under every fmt verb, so no verb reaches the credential.
+func (c SetCredential) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
 
 // LogValue redacts the credential for log/slog.
 func (c SetCredential) LogValue() slog.Value { return slog.StringValue(c.String()) }

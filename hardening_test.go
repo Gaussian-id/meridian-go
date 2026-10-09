@@ -143,6 +143,52 @@ func TestAnOddRetryableFlagNeverHidesTheRealError(t *testing.T) {
 	}
 }
 
+// nilCtx is a nil context.Context kept in a variable, so vet and staticcheck do not object to the
+// literal nil these tests are about.
+var nilCtx context.Context
+
+func TestANilContextIsAConfigErrorNotAPanic(t *testing.T) {
+	e := fakeengine.New()
+	c, a := newClient(e), newAdmin(e)
+
+	calls := map[string]func() error{
+		"Chat.Create": func() error { _, err := c.Chat.Create(nilCtx, hello()); return err },
+		"Chat.Stream": func() error { _, err := c.Chat.Stream(nilCtx, hello()); return err },
+		"Models.List": func() error { _, err := c.Models.List(nilCtx); return err },
+	}
+
+	for _, op := range adminOps() {
+		calls["admin "+op.id] = func() error { return op.call(nilCtx, a) }
+	}
+
+	for name, call := range calls {
+		panicked := false
+		err := func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					panicked = true
+
+					t.Errorf("%s panicked: %v", name, r)
+				}
+			}()
+
+			return call()
+		}()
+
+		if panicked {
+			continue
+		}
+
+		if got := asError(t, err); got.Code != meridian.CodeInvalidRequest || got.Type != meridian.TypeClient || got.Retryable {
+			t.Errorf("%s: got %+v", name, got)
+		}
+	}
+
+	if n := len(e.Requests()); n != 0 {
+		t.Fatalf("a nil context sent %d requests", n)
+	}
+}
+
 func TestZeroValueClientsReturnAConfigErrorInsteadOfPanicking(t *testing.T) {
 	var nilChat *meridian.ChatService
 
