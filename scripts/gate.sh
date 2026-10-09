@@ -20,7 +20,11 @@ if go test -race -count=1 -run '^$' ./... >/dev/null 2>&1; then race=-race; else
   echo "warning: race detector unavailable here (needs cgo); CI must run it" >&2; race=; fi
 go test $race -count=1 ./...
 
-# [4] Generated types must match the pinned documents (added in Task 2).
+# [4] Generated types must match the pinned documents.
+bash scripts/generate.sh
+if ! git diff --quiet -- internal/gen; then
+  echo "internal/gen drifted from spec/; commit the regenerated files" >&2; git diff --stat -- internal/gen >&2; exit 1
+fi
 
 # [5] The module uses the standard library only, tests included.
 third=$(go list -deps -test -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... | grep -v '^meridian.local/meridian-go' || true)

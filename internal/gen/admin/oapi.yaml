@@ -1,0 +1,6 @@
+package: admin
+generate:
+  models: true
+output: internal/gen/admin/admin.gen.go
+output-options:
+  skip-prune: true
