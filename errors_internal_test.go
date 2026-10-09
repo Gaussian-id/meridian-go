@@ -1,9 +1,11 @@
 package meridian
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -70,5 +72,88 @@ func TestFrame(t *testing.T) {
 	got := string(frame(&Error{Code: CodeInternal, Type: TypeAPI, Message: "x", RequestID: "r"}))
 	if !strings.HasPrefix(got, "data: {") || !strings.HasSuffix(got, "}\n\n") || !strings.Contains(got, `"code":"internal"`) {
 		t.Fatalf("frame %q", got)
+	}
+}
+
+func TestToWireNeverShowsTheSDKOnlyType(t *testing.T) {
+	for _, e := range []*Error{configError("x"), networkError(0, "x", nil), abortedError(context.Canceled)} {
+		if got := toWire(e); got.Type != TypeAPI {
+			t.Errorf("%s: type %q leaks to the browser", e.Code, got.Type)
+		}
+	}
+
+	if got := toWire(&Error{Code: CodeRateLimited, Type: TypeRateLimit}); got.Type != TypeRateLimit {
+		t.Fatalf("an engine type must pass unchanged, got %q", got.Type)
+	}
+}
+
+func TestToWireSaysDontRetryOnlyForACodeThatWouldBeRetried(t *testing.T) {
+	no := toWire(&Error{Code: CodeServiceUnavailable, Type: TypeAPI, Retryable: false})
+	if no.Retryable == nil || *no.Retryable {
+		t.Fatalf("a non-retryable service_unavailable must say retryable:false, got %v", no.Retryable)
+	}
+
+	if toWire(&Error{Code: CodeServiceUnavailable, Type: TypeAPI, Retryable: true}).Retryable != nil {
+		t.Fatal("retryable:true must never be emitted")
+	}
+
+	if toWire(&Error{Code: CodeInvalidAPIKey, Type: TypeAuthentication}).Retryable != nil {
+		t.Fatal("a code that is never retried has nothing to deny")
+	}
+}
+
+func TestRetryableFalseSurvivesTheWire(t *testing.T) {
+	src := &Error{Code: CodeServiceUnavailable, Type: TypeAPI, Status: 503, Message: "m"}
+
+	// In a stream frame.
+	body := bytes.TrimSuffix(bytes.TrimPrefix(frame(src), []byte("data: ")), []byte("\n\n"))
+
+	w := parseEnvelope(body)
+	if w == nil || fromWire(w, 0, "").Retryable {
+		t.Fatalf("frame %s must parse back as not retryable", body)
+	}
+
+	// In an HTTP answer.
+	rec := httptest.NewRecorder()
+	WriteError(rec, src)
+
+	if !strings.Contains(rec.Body.String(), `"retryable":false`) {
+		t.Fatalf("body %s", rec.Body.String())
+	}
+
+	w = parseEnvelope(rec.Body.Bytes())
+	if w == nil || fromWire(w, rec.Code, "").Retryable {
+		t.Fatalf("body %s must parse back as not retryable", rec.Body.String())
+	}
+}
+
+func TestFromWireRetryableCanOnlyTurnRetriesOff(t *testing.T) {
+	parse := func(code, flag string) *wireError {
+		return parseEnvelope([]byte(`{"error":{"message":"m","type":"api_error","code":"` + code + `"` + flag + `}}`))
+	}
+
+	if fromWire(parse(CodeInvalidRequest, `,"retryable":true`), 400, "").Retryable {
+		t.Fatal("retryable:true must never turn retries on")
+	}
+
+	if fromWire(parse(CodeRateLimited, `,"retryable":false`), 429, "").Retryable {
+		t.Fatal("retryable:false must turn retries off")
+	}
+
+	if !fromWire(parse(CodeRateLimited, `,"retryable":true`), 429, "").Retryable {
+		t.Fatal("retryable:true must not change a retryable code")
+	}
+
+	if !fromWire(parse(CodeRateLimited, `,"retryable":null`), 429, "").Retryable {
+		t.Fatal("a null flag is no flag")
+	}
+}
+
+func TestNilAndZeroTransportsRefuseInsteadOfPanicking(t *testing.T) {
+	for name, tr := range map[string]*transport{"nil": nil, "zero": {}, "no http client": {base: "http://engine.test"}} {
+		resp, err := tr.do(context.Background(), call{method: http.MethodGet, path: "/v1/models", accept: "application/json"})
+		if resp != nil || err == nil || err.Code != CodeInvalidRequest || err.Type != TypeClient || err.Retryable {
+			t.Errorf("%s: resp %v err %+v", name, resp, err)
+		}
 	}
 }

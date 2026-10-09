@@ -55,6 +55,10 @@ func newTransport(rawURL, key string, cfg config) *transport {
 		t.refusal = configError("The Meridian URL must not contain a query, fragment or credentials.")
 	case strings.TrimSpace(key) == "":
 		t.refusal = configError("A Meridian key is required.")
+	case !onlyBytesFrom(key, '!'):
+		// Never echo the key. A trailing newline from a secret file is the usual cause.
+		t.refusal = configError("The Meridian key has a space, control or non-ASCII character " +
+			"(a trailing newline from a secret file?); it cannot be sent as a header.")
 	default:
 		t.base = u.String()
 	}
@@ -62,13 +66,43 @@ func newTransport(rawURL, key string, cfg config) *transport {
 	return t
 }
 
+// onlyBytesFrom reports whether every byte of s is between lo and '~' (0x7E).
+func onlyBytesFrom(s string, lo byte) bool {
+	for i := range len(s) {
+		if s[i] < lo || s[i] > '~' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// validIdempotencyKey is 1–255 printable ASCII bytes that are not all spaces: what a header
+// carries intact and the engine accepts.
+func validIdempotencyKey(s string) bool {
+	return len(s) >= 1 && len(s) <= 255 && onlyBytesFrom(s, ' ') && strings.Trim(s, " ") != ""
+}
+
+// refuse explains why this transport cannot send, or nil when it can. A nil or zero-value
+// transport (a Client not made by NewClient) refuses instead of dereferencing nil.
+func (t *transport) refuse() *Error {
+	switch {
+	case t == nil || (t.refusal == nil && (t.base == "" || t.cfg.httpClient == nil)):
+		return configError("This client was not created with meridian.NewClient.")
+	case t.refusal != nil:
+		refusal := *t.refusal // a copy, so callers cannot change what the next call sees
+
+		return &refusal
+	}
+
+	return nil
+}
+
 // do sends one logical call and returns a response whose body the caller must close.
 func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
-	// [1] A refused client sends nothing.
-	if t.refusal != nil {
-		refusal := *t.refusal
-
-		return nil, &refusal
+	// [1] A refused, nil or zero-value transport sends nothing.
+	if refusal := t.refuse(); refusal != nil {
+		return nil, refusal
 	}
 
 	// [2] Encode the body once; every attempt resends the same bytes.

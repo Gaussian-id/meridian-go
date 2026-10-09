@@ -198,13 +198,17 @@ type Model struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// key is the idempotency key for this call.
+// key is the idempotency key for this call. A caller's key that a header cannot carry intact
+// is refused before any request, never silently replaced.
 func (p ChatParams) key() (string, *Error) {
-	if p.IdempotencyKey != "" {
-		return p.IdempotencyKey, nil
+	switch {
+	case p.IdempotencyKey == "":
+		return newIdempotencyKey()
+	case !validIdempotencyKey(p.IdempotencyKey):
+		return "", configError("IdempotencyKey must be 1 to 255 printable ASCII characters and not all spaces.")
 	}
 
-	return newIdempotencyKey()
+	return p.IdempotencyKey, nil
 }
 
 // body is the JSON request: Extra first, then known fields, then the SDK's stream flags.

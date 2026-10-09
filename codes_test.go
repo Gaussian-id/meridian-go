@@ -115,3 +115,38 @@ func TestWriteErrorMapsSDKFailuresTo502(t *testing.T) {
 		t.Fatalf("status %d body %s", w.Code, w.Body.String())
 	}
 }
+
+func TestWriteErrorNeverShowsTheSDKOnlyType(t *testing.T) {
+	// An SDK-only type on a code that WriteError passes through still becomes api_error.
+	w := httptest.NewRecorder()
+	meridian.WriteError(w, &meridian.Error{Code: meridian.CodeServiceUnavailable, Type: meridian.TypeClient,
+		Status: 503, Message: "down"})
+
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), "client_error") ||
+		!strings.Contains(w.Body.String(), `"type":"api_error"`) {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWriteErrorSaysWhenNotToRetry(t *testing.T) {
+	w := httptest.NewRecorder()
+	meridian.WriteError(w, &meridian.Error{Code: meridian.CodeServiceUnavailable, Type: meridian.TypeAPI,
+		Status: 503, Message: "The service is temporarily unavailable."})
+
+	if !strings.Contains(w.Body.String(), `"retryable":false`) {
+		t.Fatalf("a non-retryable service_unavailable must say so: %s", w.Body.String())
+	}
+
+	// A retryable error says nothing, and a code that is never retried has nothing to deny.
+	for _, e := range []*meridian.Error{
+		{Code: meridian.CodeServiceUnavailable, Type: meridian.TypeAPI, Status: 503, Retryable: true},
+		{Code: meridian.CodeInvalidAPIKey, Type: meridian.TypeAuthentication, Status: 401},
+	} {
+		w = httptest.NewRecorder()
+		meridian.WriteError(w, e)
+
+		if strings.Contains(w.Body.String(), "retryable") {
+			t.Fatalf("%s: unexpected retryable flag: %s", e.Code, w.Body.String())
+		}
+	}
+}
