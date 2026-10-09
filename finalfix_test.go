@@ -48,6 +48,46 @@ func TestAnIdempotencyConflictOnTheFirstAttemptIsReturnedAsIs(t *testing.T) {
 	}
 }
 
+// The engine releases the claim on a refusal before any attempt, so a 409 after a 429 is a real
+// conflict (another call holds the key) and is not replaced by the rate limit.
+func TestAConflictAfterARateLimitIsReturnedAsIs(t *testing.T) {
+	for name, call := range map[string]func(c *meridian.Client) error{
+		"Create": func(c *meridian.Client) error { _, err := c.Chat.Create(context.Background(), hello()); return err },
+		"Stream": func(c *meridian.Client) error { _, err := c.Chat.Stream(context.Background(), hello()); return err },
+	} {
+		e := fakeengine.New()
+		e.On("POST", "/v1/chat/completions",
+			fakeengine.Reply{Status: 429, Header: map[string]string{"Retry-After": "0"},
+				Body: fakeengine.Envelope("rate_limited", "Slow down.", "req-A")},
+			fakeengine.Reply{Status: 409, Body: fakeengine.Envelope("idempotency_conflict", "Key in use.", "req-B")})
+
+		got := asError(t, call(newClient(e)))
+
+		if got.Code != meridian.CodeIdempotencyConflict || got.Status != 409 || got.RequestID != "req-B" {
+			t.Errorf("%s: got %+v", name, got)
+		}
+
+		if n := len(e.Requests()); n != 2 {
+			t.Errorf("%s: want exactly 2 requests, got %d", name, n)
+		}
+	}
+}
+
+// Only a call with an idempotency key can find its own earlier attempt; any other 409 is the answer.
+func TestAConflictOnACallWithoutAKeyIsNeverSubstituted(t *testing.T) {
+	e := fakeengine.New()
+	e.On("GET", "/v1/models",
+		fakeengine.Reply{Status: 503, Header: map[string]string{"Retry-After": "0"},
+			Body: fakeengine.Envelope("service_unavailable", "busy", "req-A")},
+		fakeengine.Reply{Status: 409, Body: fakeengine.Envelope("idempotency_conflict", "Key in use.", "req-B")})
+
+	_, err := newClient(e).Models.List(context.Background())
+
+	if got := asError(t, err); got.Code != meridian.CodeIdempotencyConflict || got.RequestID != "req-B" || len(e.Requests()) != 2 {
+		t.Fatalf("got %+v after %d requests", got, len(e.Requests()))
+	}
+}
+
 func TestAFailedRetryThatIsNotAConflictIsReturnedAsIs(t *testing.T) {
 	e := fakeengine.New()
 	e.On("POST", "/v1/chat/completions",
@@ -230,6 +270,36 @@ func TestStreamFailuresInsideTheSDKCarryTheRequestID(t *testing.T) {
 			t.Errorf("%s: got %+v", name, got)
 		}
 	}
+}
+
+func TestAnAbortedStreamCarriesTheStreamsRequestID(t *testing.T) {
+	e := fakeengine.New()
+	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Body: fakeengine.SSE(fakeengine.Chunk("a")), HangBody: true,
+		Header: map[string]string{"X-Request-Id": "rq-ab"}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s, err := newClient(e).Chat.Stream(ctx, hello())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for chunk, err := range s.Chunks() {
+		if err != nil {
+			if got := asError(t, err); got.Code != meridian.CodeAborted || got.RequestID != "rq-ab" {
+				t.Fatalf("got %+v", got)
+			}
+
+			return
+		}
+
+		if chunk.Text() == "a" {
+			cancel()
+		}
+	}
+
+	t.Fatal("the loop must end with an aborted error")
 }
 
 func TestANilErrorHasAFixedMessageAndNeverPanics(t *testing.T) {

@@ -310,9 +310,9 @@ if errors.As(err, &me) {
 - **`Retryable`** is true for `rate_limited`, `upstream_unavailable`, `service_unavailable`,
   `deadline_exceeded` and `network_error`.
 - **`Status`** is the HTTP status of the engine's reply, and a malformed or unreadable reply keeps
-  its real status. It is 0 only when there is no status to report: no reply arrived (a network
-  failure, a cancellation, a configuration error) or the failure is inside a stream that had already
-  begun (an engine error frame carries the status the engine uses for its code).
+  its real status. It is 0 when no HTTP reply arrived, and for an SDK-side failure inside a stream
+  that had begun (a truncation, an unreadable frame); engine error frames carry the status for
+  their code.
   **`RequestID`** is the engine's id when known, also for a failure inside a stream.
 - A cancelled or expired `context.Context` gives `aborted`, and `errors.Is(err, context.Canceled)` or
   `context.DeadlineExceeded` still works.
@@ -329,7 +329,9 @@ stops when the context ends. Chat sends one `Idempotency-Key` per logical call (
 `ChatParams.IdempotencyKey` to choose it), the same on every retry. A key must be 1–255 bytes, each
 visible ASCII (0x21–0x7E, so no spaces), or the call is refused before anything is sent. If a retry
 is answered with `idempotency_conflict`, the engine already has the call's earlier attempt, so you
-get that attempt's error (its code, message, status and request id), not the conflict.
+get that attempt's error (its code, message, status and request id), not the conflict. The exception
+is an earlier `rate_limited`: the engine releases the key when it refuses before any attempt, so a
+conflict after one is a genuine conflict and is returned as it came.
 
 ## No price, no cost
 

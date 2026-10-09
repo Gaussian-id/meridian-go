@@ -83,6 +83,21 @@ func TestARateLimitPassesTheEnginesRetryAfterToTheBrowser(t *testing.T) {
 	}
 }
 
+// Only rate_limited relays the engine's Retry-After; another pass-through code does not.
+func TestAPassThroughUpstreamUnavailableRelaysNoRetryAfter(t *testing.T) {
+	for _, body := range []string{msgs + "}", msgs + `,"stream":true}`} {
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Status: 502, Header: map[string]string{"Retry-After": "5"},
+			Body: fakeengine.Envelope("upstream_unavailable", "Provider down.", "rq-u")})
+
+		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(body))
+
+		if w.Code != 502 || errorCode(w) != "upstream_unavailable" || w.Header().Get("Retry-After") != "" {
+			t.Errorf("%s: %d %v %s", body, w.Code, w.Header(), w.Body.String())
+		}
+	}
+}
+
 func TestTheGeneric503NeverCarriesARetryAfter(t *testing.T) {
 	// hard_limit_reached is a 429 about the app's own account, and the engine sends Retry-After with it.
 	for _, body := range []string{msgs + "}", msgs + `,"stream":true}`} {

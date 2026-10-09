@@ -148,8 +148,10 @@ func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
 		}
 
 		// A retry that finds its own key in use means the attempt before it reached the engine and
-		// failed; that failure is what the caller needs to see, not the conflict.
-		if previous != nil && c.idempotencyKey != "" && err.Code == CodeIdempotencyConflict {
+		// failed; that failure is what the caller needs to see, not the conflict. A rate limit is
+		// the exception: the engine releases the claim when it refuses before any attempt, so a
+		// conflict after one is a genuine conflict.
+		if previous != nil && previous.Code != CodeRateLimited && c.idempotencyKey != "" && err.Code == CodeIdempotencyConflict {
 			return nil, previous
 		}
 

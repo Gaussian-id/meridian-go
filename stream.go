@@ -282,6 +282,14 @@ func (s *ChatStream) streamError(msg string, cause error) *Error {
 	return e
 }
 
+// aborted is a cancellation of this stream; like any failure inside it, it carries the request id.
+func (s *ChatStream) aborted(cause error) *Error {
+	e := abortedError(cause)
+	e.RequestID = s.requestID
+
+	return e
+}
+
 // readError classifies a body read failure.
 func (s *ChatStream) readError(err error) *Error {
 	s.mu.Lock()
@@ -290,9 +298,9 @@ func (s *ChatStream) readError(err error) *Error {
 
 	switch {
 	case cancelled:
-		return abortedError(context.Canceled)
+		return s.aborted(context.Canceled)
 	case s.ctx.Err() != nil:
-		return abortedError(s.ctx.Err())
+		return s.aborted(s.ctx.Err())
 	case errors.Is(err, errEventTooLarge):
 		return s.streamError("The stream sent an event larger than the SDK accepts.", err)
 	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):

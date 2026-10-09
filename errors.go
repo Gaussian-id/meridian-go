@@ -16,10 +16,10 @@ type Error struct {
 	Code string
 	// Type is one of the engine's five types, or TypeClient for failures inside the SDK.
 	Type string
-	// Status is the HTTP status of the engine's reply. It is 0 only when there is no status to
-	// report: no reply arrived (a network failure, a cancellation, a configuration error) or the
-	// failure is inside a stream whose reply had already begun (an engine error frame carries the
-	// status the engine uses for its code). A malformed or unreadable reply keeps its real status.
+	// Status is the HTTP status of the engine's reply. It is 0 when no HTTP reply arrived, and for
+	// an SDK-side failure inside a stream that had begun (a truncation, an unreadable frame);
+	// engine error frames carry the status for their code. A malformed or unreadable reply keeps
+	// its real status.
 	Status int
 	// Message is the engine's message, or the SDK's own explanation.
 	Message string
