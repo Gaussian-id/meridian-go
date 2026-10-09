@@ -110,6 +110,9 @@ type ChatCompletion struct {
 	RequestID string `json:"-"`
 }
 
+// setRequestID is called by send with the X-Request-Id header.
+func (c *ChatCompletion) setRequestID(id string) { c.RequestID = id }
+
 // Text is the first choice's content, or "".
 func (c *ChatCompletion) Text() string {
 	if len(c.Choices) == 0 || c.Choices[0].Message.Content == nil {

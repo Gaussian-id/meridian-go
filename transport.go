@@ -96,7 +96,7 @@ func validIdempotencyKey(s string) bool {
 func (t *transport) refuse() *Error {
 	switch {
 	case t == nil || (t.refusal == nil && (t.base == "" || t.cfg.httpClient == nil)):
-		return configError("This client was not created with meridian.NewClient.")
+		return configError("This client was not created with meridian.NewClient or meridian.NewAdminClient.")
 	case t.refusal != nil:
 		refusal := *t.refusal // a copy, so callers cannot change what the next call sees
 
@@ -319,22 +319,59 @@ func (c *cancelOnClose) Close() error {
 	return c.err
 }
 
-// decodeJSON reads a successful body into v.
-func decodeJSON(ctx context.Context, resp *http.Response, v any) *Error {
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+// maxReplyBytes bounds a buffered reply so a broken upstream cannot exhaust memory. It is a
+// variable only so a test can lower it.
+var maxReplyBytes int64 = 64 << 20
+
+// requestIDSetter is implemented by a reply type that carries the engine's request id.
+type requestIDSetter interface{ setRequestID(string) }
+
+// send runs one call and decodes its JSON reply into a new T; a 204 gives a zero T. It is the
+// one place a buffered reply is read, size-capped and decoded, so every reply fails the same way:
+// a body that is cut off, too large or not the expected JSON is a network_error that never
+// quotes the body (it may hold a secret, such as an issued key).
+func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
+	// [1] Ask for JSON unless the caller wants something else.
+	if c.accept == "" {
+		c.accept = "application/json"
+	}
+
+	// [2] Send, retrying as the call's policy allows.
+	resp, err := t.do(ctx, c)
 	if err != nil {
-		if ctx.Err() != nil {
-			return abortedError(ctx.Err())
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+
+	// [3] Read the body, unless the engine said there is none.
+	var out T
+
+	if resp.StatusCode != http.StatusNoContent {
+		data, rerr := io.ReadAll(io.LimitReader(resp.Body, maxReplyBytes+1))
+		if rerr != nil {
+			if ctx.Err() != nil {
+				return nil, abortedError(ctx.Err())
+			}
+
+			return nil, networkError(resp.StatusCode, "The connection dropped while reading the response body.", rerr)
 		}
 
-		return networkError(resp.StatusCode, "The connection dropped while reading the response body.", err)
+		if int64(len(data)) > maxReplyBytes {
+			return nil, networkError(resp.StatusCode, "The engine's reply was larger than the SDK accepts.", nil)
+		}
+
+		if jerr := json.Unmarshal(data, &out); jerr != nil {
+			return nil, networkError(resp.StatusCode, "The engine's reply was not valid JSON.", jerr)
+		}
 	}
 
-	if err := json.Unmarshal(data, v); err != nil {
-		return networkError(resp.StatusCode, "The engine's reply was not valid JSON.", err)
+	// [4] A reply that carries the request id gets it from the header.
+	if r, ok := any(&out).(requestIDSetter); ok {
+		r.setRequestID(resp.Header.Get("X-Request-Id"))
 	}
 
-	return nil
+	return &out, nil
 }
 
 func newIdempotencyKey() (string, *Error) {

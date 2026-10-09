@@ -44,22 +44,8 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 		return nil, kerr
 	}
 
-	resp, err := s.tr().do(ctx, call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
-		accept: "application/json", idempotencyKey: idem, policy: retryRetryable})
-	if err != nil {
-		return nil, err
-	}
-
-	defer resp.Body.Close()
-
-	var out ChatCompletion
-	if derr := decodeJSON(ctx, resp, &out); derr != nil {
-		return nil, derr
-	}
-
-	out.RequestID = resp.Header.Get("X-Request-Id")
-
-	return &out, nil
+	return send[ChatCompletion](ctx, s.tr(), call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
+		idempotencyKey: idem, policy: retryRetryable})
 }
 
 // Stream sends a chat request and returns the reply as a stream. Usage is always requested.
@@ -97,21 +83,16 @@ func (s *ModelsService) tr() *transport {
 	return s.t
 }
 
+// modelList is the GET /v1/models reply.
+type modelList struct {
+	Data []Model `json:"data"`
+}
+
 // List returns the models the key may use.
 func (s *ModelsService) List(ctx context.Context) ([]Model, error) {
-	resp, err := s.tr().do(ctx, call{method: http.MethodGet, path: "/v1/models", accept: "application/json", policy: retryRetryable})
+	list, err := send[modelList](ctx, s.tr(), call{method: http.MethodGet, path: "/v1/models", policy: retryRetryable})
 	if err != nil {
 		return nil, err
-	}
-
-	defer resp.Body.Close()
-
-	var list struct {
-		Data []Model `json:"data"`
-	}
-
-	if derr := decodeJSON(ctx, resp, &list); derr != nil {
-		return nil, derr
 	}
 
 	return list.Data, nil
