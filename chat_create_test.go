@@ -235,9 +235,26 @@ func TestCancelledContextIsAborted(t *testing.T) {
 	}
 }
 
+// waitUntil fails the test if cond is still false after five seconds; a hang then fails fast
+// instead of running until the test binary times out.
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestAbortWhileReadingTheBodyIsAborted(t *testing.T) {
+	// The fake says when the body read is blocked, so the cancel always lands mid-read.
+	blocked := make(chan struct{}, 1)
 	e := fakeengine.New()
-	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Body: []byte(`{"id":`), HangBody: true})
+	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Body: []byte(`{"id":`), HangBody: true, Blocked: blocked})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -247,8 +264,10 @@ func TestAbortWhileReadingTheBodyIsAborted(t *testing.T) {
 		done <- err
 	}()
 
-	for len(e.Requests()) == 0 {
-		time.Sleep(time.Millisecond) // wait until the engine has the request and is sending the body
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the body read never started")
 	}
 
 	cancel()
@@ -329,9 +348,7 @@ func TestCallerCancelWhileWaitingForHeadersIsAborted(t *testing.T) {
 		done <- err
 	}()
 
-	for len(e.Requests()) == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	waitUntil(t, "the engine to receive the request", func() bool { return len(e.Requests()) > 0 })
 
 	cancel()
 

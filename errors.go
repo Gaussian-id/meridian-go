@@ -16,7 +16,10 @@ type Error struct {
 	Code string
 	// Type is one of the engine's five types, or TypeClient for failures inside the SDK.
 	Type string
-	// Status is the HTTP status; 0 for network, cancellation and configuration errors.
+	// Status is the HTTP status of the engine's reply. It is 0 only when there is no status to
+	// report: no reply arrived (a network failure, a cancellation, a configuration error) or the
+	// failure is inside a stream whose reply had already begun (an engine error frame carries the
+	// status the engine uses for its code). A malformed or unreadable reply keeps its real status.
 	Status int
 	// Message is the engine's message, or the SDK's own explanation.
 	Message string
@@ -29,10 +32,17 @@ type Error struct {
 	EngineCode string
 
 	cause error
+	// retryAfter is the engine's Retry-After header when it was valid (delta-seconds or an HTTP
+	// date), for WriteError to hand on.
+	retryAfter string
 }
 
 // Error implements the error interface.
 func (e *Error) Error() string {
+	if e == nil {
+		return "meridian: nil error"
+	}
+
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "meridian: %s", e.Code)
@@ -119,14 +129,51 @@ func cleanRequestID(id string) string {
 	return id
 }
 
-// parseEnvelope returns the error inside a Meridian envelope, or nil for anything else.
+// hasCaseVariant reports whether m has a member whose name is one of names in a different letter
+// case. encoding/json matches names case-insensitively and a browser's JSON.parse does not, so
+// such a body can be read two ways; the SDK never judges one (it fails closed).
+func hasCaseVariant(m map[string]json.RawMessage, names ...string) bool {
+	for k := range m {
+		for _, n := range names {
+			if k != n && strings.EqualFold(k, n) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// parseEnvelope returns the error inside a Meridian envelope, or nil for anything else. Members
+// are found by their exact names; a case variant of error, message, type or code makes the body
+// unjudgeable (nil).
 func parseEnvelope(body []byte) *wireError {
-	var env envelope
-	if json.Unmarshal(body, &env) != nil || env.Error == nil || env.Error.Code == "" || env.Error.Type == "" {
+	// [1] The top level: exactly "error", no case variant of it.
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil || hasCaseVariant(top, "error") {
 		return nil
 	}
 
-	return env.Error
+	// [2] The error object: no case variant of the members the SDK reads.
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(top["error"], &fields) != nil || fields == nil || hasCaseVariant(fields, "message", "type", "code") {
+		return nil
+	}
+
+	// [3] The strings, by exact name; a member that is not a string makes the body unreadable.
+	w := &wireError{Retryable: fields["retryable"]}
+
+	for name, dst := range map[string]*string{"message": &w.Message, "type": &w.Type, "code": &w.Code, "request_id": &w.RequestID} {
+		if raw, has := fields[name]; has && json.Unmarshal(raw, dst) != nil {
+			return nil
+		}
+	}
+
+	if w.Code == "" || w.Type == "" {
+		return nil
+	}
+
+	return w
 }
 
 // knownTypes are the error types a decoded envelope may keep: the engine's five and the SDK's own.
@@ -169,13 +216,21 @@ func fromWire(w *wireError, status int, headerID string) *Error {
 // errorFromResponse decodes a failed response; a non-Meridian body is a network error.
 func errorFromResponse(resp *http.Response, body []byte) *Error {
 	id := resp.Header.Get("X-Request-Id")
+
+	var e *Error
+
 	if w := parseEnvelope(body); w != nil {
-		return fromWire(w, resp.StatusCode, id)
+		e = fromWire(w, resp.StatusCode, id)
+	} else {
+		e = networkError(resp.StatusCode,
+			fmt.Sprintf("The engine answered HTTP %d without a Meridian error body.", resp.StatusCode), nil)
+		e.RequestID = cleanRequestID(id)
 	}
 
-	e := networkError(resp.StatusCode,
-		fmt.Sprintf("The engine answered HTTP %d without a Meridian error body.", resp.StatusCode), nil)
-	e.RequestID = cleanRequestID(id)
+	// Kept for WriteError, which hands it on for a rate limit; only a valid value is kept.
+	if h := strings.TrimSpace(resp.Header.Get("Retry-After")); retryAfter(h) >= 0 {
+		e.retryAfter = h
+	}
 
 	return e
 }
@@ -193,7 +248,8 @@ func frame(e *Error) []byte {
 // configuration error does, or when the status is not an error status). It hides nothing, and
 // the SDK-only type client_error is written as api_error. An error that is not a *Error is an
 // internal error with no detail (so is a nil *Error, however it is wrapped). A request id that is
-// not printable ASCII (1–255 bytes) is left out of the header and the body.
+// not printable ASCII (1–255 bytes) is left out of the header and the body. A rate_limited error
+// that came from the engine with a valid Retry-After (seconds or an HTTP date) repeats it.
 //
 // A route that a browser or an app calls must not show it why your server failed (a missing key,
 // an unreachable engine, your own account's credit): use package forward, which applies the
@@ -218,6 +274,10 @@ func WriteError(w http.ResponseWriter, err error) {
 
 	if body.RequestID != "" {
 		w.Header().Set("X-Request-Id", body.RequestID)
+	}
+
+	if e.Code == CodeRateLimited && e.retryAfter != "" {
+		w.Header().Set("Retry-After", e.retryAfter)
 	}
 
 	w.WriteHeader(status)

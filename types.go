@@ -1,6 +1,10 @@
 package meridian
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"meridian.local/meridian-go/internal/idemkey"
+)
 
 // Role is a message role. The engine forwards any role as sent; these are the ones providers accept.
 type Role string
@@ -29,7 +33,9 @@ type ChatParams struct {
 	ResponseFormat      any           `json:"response_format,omitempty"`
 	User                string        `json:"user,omitempty"`
 
-	// IdempotencyKey is sent on every retry of this call; empty means the SDK generates one.
+	// IdempotencyKey is sent on every retry of this call; empty means the SDK generates one. It
+	// must be 1–255 bytes, each visible ASCII (0x21–0x7E, so no spaces), or the call is refused
+	// with invalid_request before anything is sent.
 	IdempotencyKey string `json:"-"`
 	// Extra holds request fields the engine forwards to the provider. Known fields and the
 	// stream flags always win over Extra.
@@ -210,8 +216,8 @@ func (p ChatParams) key() (string, *Error) {
 	switch {
 	case p.IdempotencyKey == "":
 		return newIdempotencyKey()
-	case !validIdempotencyKey(p.IdempotencyKey):
-		return "", configError("IdempotencyKey must be 1 to 255 printable ASCII characters and not all spaces.")
+	case !idemkey.Valid(p.IdempotencyKey):
+		return "", configError("IdempotencyKey must be 1 to 255 visible ASCII characters (no spaces).")
 	}
 
 	return p.IdempotencyKey, nil

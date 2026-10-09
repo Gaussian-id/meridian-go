@@ -44,7 +44,7 @@ func TestAKeyWithBytesUnsafeInAHeaderIsRefusedWithoutSending(t *testing.T) {
 	}
 }
 
-func TestACallerIdempotencyKeyMustBeOneToTwoFiftyFivePrintableASCII(t *testing.T) {
+func TestACallerIdempotencyKeyMustBeOneToTwoFiftyFiveVisibleASCII(t *testing.T) {
 	e := fakeengine.New()
 	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Body: fakeengine.Completion("ok")})
 
@@ -56,6 +56,9 @@ func TestACallerIdempotencyKeyMustBeOneToTwoFiftyFivePrintableASCII(t *testing.T
 		"non-ASCII":        "order-é",
 		"256 characters":   strings.Repeat("k", 256),
 		"all spaces":       "   ",
+		"inner space":      "order 42",
+		"leading space":    " order-1",
+		"trailing space":   "order-1 ",
 	} {
 		p := hello()
 		p.IdempotencyKey = key
@@ -76,7 +79,7 @@ func TestACallerIdempotencyKeyMustBeOneToTwoFiftyFivePrintableASCII(t *testing.T
 	}
 
 	// The edges of the allowed range still go out, unchanged.
-	for _, key := range []string{"k", strings.Repeat("k", 255), "order 1 ~!"} {
+	for _, key := range []string{"k", strings.Repeat("k", 255), "a-b_c.1", "!~"} {
 		p := hello()
 		p.IdempotencyKey = key
 

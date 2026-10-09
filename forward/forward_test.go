@@ -415,7 +415,9 @@ func TestAnOversizedBodyIsRefusedWithoutReachingTheEngine(t *testing.T) {
 }
 
 func TestBrowserIdempotencyKeysAreForwardedWhenWellFormed(t *testing.T) {
-	for key, forwarded := range map[string]bool{"k-123": true, "a b": true, strings.Repeat("a", 255): true, "   ": false,
+	// The engine's rule: 1–255 bytes, every byte 0x21–0x7E, so no space anywhere.
+	for key, forwarded := range map[string]bool{"k-123": true, "a-b_c.1": true, strings.Repeat("a", 255): true,
+		"a b": false, "order 42": false, " lead": false, "trail ": false, "   ": false,
 		strings.Repeat("a", 256): false, "ü": false, "a\x7fb": false, "a\tb": false} {
 		for _, stream := range []bool{false, true} {
 			e := fakeengine.New()

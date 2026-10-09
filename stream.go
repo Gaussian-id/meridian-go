@@ -274,6 +274,14 @@ func (s *ChatStream) setUsage(u *Usage) {
 	s.usage = &counts
 }
 
+// streamError is a failure inside this stream; it carries the stream's request id.
+func (s *ChatStream) streamError(msg string, cause error) *Error {
+	e := networkError(0, msg, cause)
+	e.RequestID = s.requestID
+
+	return e
+}
+
 // readError classifies a body read failure.
 func (s *ChatStream) readError(err error) *Error {
 	s.mu.Lock()
@@ -286,11 +294,11 @@ func (s *ChatStream) readError(err error) *Error {
 	case s.ctx.Err() != nil:
 		return abortedError(s.ctx.Err())
 	case errors.Is(err, errEventTooLarge):
-		return networkError(0, "The stream sent an event larger than the SDK accepts.", err)
+		return s.streamError("The stream sent an event larger than the SDK accepts.", err)
 	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
-		return networkError(0, "The stream ended before [DONE].", err)
+		return s.streamError("The stream ended before [DONE].", err)
 	default:
-		return networkError(0, "The stream connection failed.", err)
+		return s.streamError("The stream connection failed.", err)
 	}
 }
 
@@ -308,7 +316,7 @@ const (
 // an event of a type other than "message" (the engine sends none).
 func (s *ChatStream) decode(ev event) (frameKind, ChatChunk, *Error) {
 	if ev.eventType != "" && ev.eventType != "message" {
-		return frameFailed, ChatChunk{}, networkError(0, "The stream sent an event the SDK does not read.", nil)
+		return frameFailed, ChatChunk{}, s.streamError("The stream sent an event the SDK does not read.", nil)
 	}
 
 	if !ev.hasData {
@@ -319,32 +327,34 @@ func (s *ChatStream) decode(ev event) (frameKind, ChatChunk, *Error) {
 		return frameDone, ChatChunk{}, nil
 	}
 
-	var probe struct {
-		Error   json.RawMessage `json:"error"`
-		Choices json.RawMessage `json:"choices"`
-	}
+	// Members are looked up by their exact names, as a browser's JSON.parse would; a case variant
+	// of "error" or "choices" would be read one way here and another there, so it is not judged.
+	var probe map[string]json.RawMessage
 
-	if json.Unmarshal([]byte(ev.data), &probe) != nil {
-		return frameFailed, ChatChunk{}, networkError(0, "The stream sent a frame that is not valid JSON.", nil)
+	switch {
+	case json.Unmarshal([]byte(ev.data), &probe) != nil:
+		return frameFailed, ChatChunk{}, s.streamError("The stream sent a frame that is not valid JSON.", nil)
+	case hasCaseVariant(probe, "error", "choices"):
+		return frameFailed, ChatChunk{}, s.streamError("The stream sent a frame the SDK cannot judge (a member name in another letter case).", nil)
 	}
 
 	// [1] An error member makes it an error frame, valid or not.
-	if len(probe.Error) > 0 && string(probe.Error) != "null" {
+	if e := probe["error"]; len(e) > 0 && string(e) != "null" {
 		if w := parseEnvelope([]byte(ev.data)); w != nil {
 			return frameFailed, ChatChunk{}, fromWire(w, 0, s.requestID)
 		}
 
-		return frameFailed, ChatChunk{}, networkError(0, "The stream sent an error frame the SDK could not read.", nil)
+		return frameFailed, ChatChunk{}, s.streamError("The stream sent an error frame the SDK could not read.", nil)
 	}
 
 	// [2] Otherwise it must be a chat chunk.
-	if len(probe.Choices) == 0 || string(probe.Choices) == "null" {
-		return frameFailed, ChatChunk{}, networkError(0, "The stream sent a frame that is not a chat chunk.", nil)
+	if c := probe["choices"]; len(c) == 0 || string(c) == "null" {
+		return frameFailed, ChatChunk{}, s.streamError("The stream sent a frame that is not a chat chunk.", nil)
 	}
 
 	var chunk ChatChunk
 	if json.Unmarshal([]byte(ev.data), &chunk) != nil {
-		return frameFailed, ChatChunk{}, networkError(0, "The stream sent a frame that is not a chat chunk.", nil)
+		return frameFailed, ChatChunk{}, s.streamError("The stream sent a frame that is not a chat chunk.", nil)
 	}
 
 	if chunk.Usage != nil {

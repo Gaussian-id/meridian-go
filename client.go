@@ -32,7 +32,9 @@ func (s *ChatService) tr() *transport {
 	return s.t
 }
 
-// Create sends a chat request and waits for the whole reply.
+// Create sends a chat request and waits for the whole reply. The engine sends headers only after
+// the whole reply is generated, so Create waits up to 300 s for them (Stream and the admin client
+// 60 s); WithHeaderTimeout, if given, replaces that for every call. Bound the call with ctx.
 func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion, error) {
 	body, berr := p.body(false)
 	if berr != nil {
@@ -45,7 +47,7 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 	}
 
 	return send[ChatCompletion](ctx, s.tr(), call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
-		idempotencyKey: idem, resultOnly: true})
+		idempotencyKey: idem, headerTimeout: bufferedHeaderTimeout})
 }
 
 // Stream sends a chat request and returns the reply as a stream. Usage is always requested.

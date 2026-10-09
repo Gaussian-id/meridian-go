@@ -17,10 +17,10 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"unicode/utf8"
 
 	"meridian.local/meridian-go"
+	"meridian.local/meridian-go/internal/idemkey"
 )
 
 // Decision is what an authorisation check decided.
@@ -51,7 +51,7 @@ type AllowRule struct {
 	// Model lets the browser name a model; otherwise Meridian chooses.
 	Model bool
 	// Options are extra request fields the browser may send, by name. messages, model, stream,
-	// stream_options, max_tokens, max_completion_tokens and temperature are never copied raw.
+	// stream_options, max_tokens, max_completion_tokens, n and temperature are never copied raw.
 	Options []string
 	// MaxTokensCap caps max_tokens; 0 or less means DefaultMaxTokensCap, and a value above
 	// math.MaxInt32 (the engine's range) is lowered to math.MaxInt32.
@@ -87,8 +87,9 @@ var (
 // neverRaw are the fields the handler decides itself; AllowRule.Options can never copy them.
 // max_completion_tokens is here for consistency with the cap: the engine applies the smaller of it
 // and max_tokens, so a browser could not lift the cap with it, but the handler states one limit.
+// n is here because a browser must not multiply the output (n choices of up to the cap each).
 var neverRaw = map[string]bool{"messages": true, "model": true, "stream": true, "stream_options": true,
-	"max_tokens": true, "max_completion_tokens": true, "temperature": true}
+	"max_tokens": true, "max_completion_tokens": true, "temperature": true, "n": true}
 
 var appAccount = []string{
 	meridian.CodeInvalidAPIKey, meridian.CodeKeyRevoked, meridian.CodeKeyExpired,
@@ -434,17 +435,11 @@ func number(raw json.RawMessage) (float64, bool) {
 	return f, true
 }
 
-// browserKey forwards a well-formed browser idempotency key: 1–255 bytes, every byte printable
-// ASCII (0x20–0x7E), not all spaces. Otherwise "" and the client generates one.
+// browserKey forwards a well-formed browser idempotency key (the rule the engine and
+// ChatParams.IdempotencyKey share). Otherwise "" and the client generates one.
 func browserKey(k string) string {
-	if len(k) == 0 || len(k) > 255 || strings.Trim(k, " ") == "" {
+	if !idemkey.Valid(k) {
 		return ""
-	}
-
-	for i := range len(k) {
-		if k[i] < ' ' || k[i] > '~' {
-			return ""
-		}
 	}
 
 	return k

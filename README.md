@@ -99,8 +99,13 @@ func main() {
 - Read a stream once, with `Chunks`, `Text` or `ServeSSE`. Reading to the end, or breaking out of the
   loop, releases the connection; a stream you never read must be released with `Close`.
 - Pass the incoming request's context so that a browser disconnect cancels the engine call.
-- Options: `WithHTTPClient`, `WithMaxRetries` (0–10, default 2), `WithHeaderTimeout` (default 60 s,
-  covers only the wait for response headers) and `WithUserAgentSuffix`.
+- Options: `WithHTTPClient`, `WithMaxRetries` (0–10, default 2), `WithHeaderTimeout` (covers only the
+  wait for response headers) and `WithUserAgentSuffix` (a suffix with a byte outside 0x20–0x7E, such
+  as a newline, makes the client refuse every call with `invalid_request`).
+- **Header timeout.** The engine sends the headers of a buffered reply only after the whole reply is
+  generated, so `Chat.Create` waits up to **300 s** for headers by default, and `Chat.Stream` and the
+  admin client up to 60 s. If you set `WithHeaderTimeout`, that value applies to every call. Bound the
+  whole call with the context.
 
 To relay a stream from your own route, `stream.ServeSSE(w, mapError)` copies it to the response byte
 for byte, flushing after each event, and returns the error that ended it. `mapError` may replace the
@@ -241,9 +246,10 @@ What `forward.New` does, in order:
      `[1, cap]`. A cap above `math.MaxInt32` is lowered to it.
    - `temperature` only if it is a JSON number; `model` only if `AllowRule.Model` is true; extra
      fields only by name in `AllowRule.Options`. `messages`, `model`, `stream`, `stream_options`,
-     `max_tokens`, `max_completion_tokens` and `temperature` are never copied raw.
-   - A browser `Idempotency-Key` is forwarded when it is 1–255 printable ASCII bytes and not all
-     spaces; otherwise the client generates one.
+     `max_tokens`, `max_completion_tokens`, `n` and `temperature` are never copied raw (a browser
+     cannot ask for more output than the cap).
+   - A browser `Idempotency-Key` is forwarded when it is 1–255 bytes and every byte is visible ASCII
+     (0x21–0x7E, so no spaces, as the engine requires); otherwise the client generates one.
 6. **The engine call** uses the request's context, so a browser disconnect cancels it upstream.
    `"stream": true` in the body relays the engine's stream (always asking for usage); otherwise the
    reply is buffered and returned as JSON.
@@ -265,9 +271,16 @@ What a browser may learn from a failure, decided in one place:
   upstream request is closed.
 - **Everything else passes through unchanged:** `rate_limited`, `invalid_request`, `model_not_found`,
   `deadline_exceeded`, and the rest of the engine's codes. A mid-stream engine error frame that passes
-  is relayed byte for byte.
-- **Request ids** are put in a response header (and an error body) only when they are 1–255 printable
-  ASCII bytes; any other value is left out.
+  is relayed byte for byte. A `rate_limited` answer before streaming starts, or for a buffered call,
+  also repeats the engine's `Retry-After` header when it is a valid number of seconds or an HTTP
+  date; the generic 503 never carries one.
+- **The stream guard assumes a direct connection from the SDK to the engine.** It reads the engine's
+  own framing (`data:` events, `[DONE]`) and fails closed on anything else, so a proxy between them
+  that adds `event:` lines or other fields makes every stream end in the generic error frame.
+- **Request ids** in the error bodies and headers that the SDK builds are cleaned: they are put there
+  only when they are 1–255 printable ASCII bytes, and any other value is left out. A mid-stream frame
+  that passes through is the engine's own bytes, so its request id is the engine's, JSON-escaped as
+  the engine wrote it.
 
 Your own server-side calls through `meridian.Client` still see the real codes.
 
@@ -296,8 +309,11 @@ if errors.As(err, &me) {
   `permission_error`, `rate_limit_error`, `api_error`) or `client_error` for a failure inside the SDK.
 - **`Retryable`** is true for `rate_limited`, `upstream_unavailable`, `service_unavailable`,
   `deadline_exceeded` and `network_error`.
-- **`Status`** is the HTTP status, 0 for network, cancellation and configuration errors.
-  **`RequestID`** is the engine's id when known.
+- **`Status`** is the HTTP status of the engine's reply, and a malformed or unreadable reply keeps
+  its real status. It is 0 only when there is no status to report: no reply arrived (a network
+  failure, a cancellation, a configuration error) or the failure is inside a stream that had already
+  begun (an engine error frame carries the status the engine uses for its code).
+  **`RequestID`** is the engine's id when known, also for a failure inside a stream.
 - A cancelled or expired `context.Context` gives `aborted`, and `errors.Is(err, context.Canceled)` or
   `context.DeadlineExceeded` still works.
 - `meridian.WriteError(w, err)` writes an error as the engine's JSON envelope from your own handler.
@@ -310,8 +326,10 @@ At most `WithMaxRetries` (default 2) retries, only for retryable errors, only be
 is read, and never mid-stream. `Retry-After` (seconds or an HTTP date) is honoured; a wait over 30 s
 is not retried; otherwise the wait is exponential with jitter (250–500 ms doubling, at most 8 s) and
 stops when the context ends. Chat sends one `Idempotency-Key` per logical call (set
-`ChatParams.IdempotencyKey` to choose it), the same on every retry. A key must be 1–255 printable
-ASCII bytes and not all spaces, or the call is refused before anything is sent.
+`ChatParams.IdempotencyKey` to choose it), the same on every retry. A key must be 1–255 bytes, each
+visible ASCII (0x21–0x7E, so no spaces), or the call is refused before anything is sent. If a retry
+is answered with `idempotency_conflict`, the engine already has the call's earlier attempt, so you
+get that attempt's error (its code, message, status and request id), not the conflict.
 
 ## No price, no cost
 

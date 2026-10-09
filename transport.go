@@ -21,6 +21,14 @@ import (
 // It is private so a header timeout never satisfies errors.Is(err, context.Canceled).
 var errHeaderTimeout = errors.New("meridian: header timeout")
 
+// The wait for response headers when the caller set none. The engine sends headers for a buffered
+// chat call only after the whole generation, so that call (call.headerTimeout) waits longer. They
+// are variables only so a test can lower them.
+var (
+	defaultHeaderTimeout  = 60 * time.Second
+	bufferedHeaderTimeout = 300 * time.Second
+)
+
 // call is one logical request. Which failures may be retried is derived from it (mayRetry), so
 // the zero value of every field is the safe choice.
 type call struct {
@@ -28,11 +36,17 @@ type call struct {
 	path           string // already escaped
 	query          url.Values
 	body           any
-	accept         string // empty means application/json
-	idempotencyKey string // sent on every attempt; the engine replays a repeat instead of running it twice
-	repeatable     bool   // a repeat is harmless although there is no idempotency key (the engine replays on a reference)
-	noContent      bool   // the operation answers 204 with no body (a DELETE); no other call accepts a 204
-	resultOnly     bool   // a 2xx body with a non-null top-level "error" member is not a result (chat)
+	accept         string        // empty means application/json
+	idempotencyKey string        // sent on every attempt; the engine replays a repeat instead of running it twice
+	repeatable     bool          // a repeat is harmless although there is no idempotency key (the engine replays on a reference)
+	noContent      bool          // the operation answers 204 with no body (a DELETE); no other call accepts a 204
+	headerTimeout  time.Duration // this call's own default wait for headers; 0 means defaultHeaderTimeout
+}
+
+// headerTimeoutFor is how long an attempt of c waits for response headers: what the caller set
+// with WithHeaderTimeout, for every call; otherwise the call's own default.
+func (t *transport) headerTimeoutFor(c call) time.Duration {
+	return cmp.Or(t.cfg.headerTimeout, c.headerTimeout, defaultHeaderTimeout)
 }
 
 type transport struct {
@@ -57,6 +71,8 @@ func newTransport(rawURL, key string, cfg config) *transport {
 		// Never echo the key. A trailing newline from a secret file is the usual cause.
 		t.refusal = configError("The Meridian key has a space, control or non-ASCII character " +
 			"(a trailing newline from a secret file?); it cannot be sent as a header.")
+	case cfg.badUserAgent:
+		t.refusal = configError("The User-Agent suffix has a control or non-ASCII character; it cannot be sent as a header.")
 	default:
 		t.base = u.String()
 	}
@@ -65,7 +81,8 @@ func newTransport(rawURL, key string, cfg config) *transport {
 }
 
 // The ASCII range a header value can carry intact. A key has no spaces, so it starts at
-// firstVisible; an idempotency key may contain spaces, so it starts at firstPrintable.
+// firstVisible; a request id or a User-Agent suffix may contain spaces, so it starts at
+// firstPrintable. (An idempotency key has its own rule: package idemkey.)
 const (
 	firstPrintable = ' ' // 0x20
 	firstVisible   = '!' // 0x21
@@ -81,12 +98,6 @@ func onlyBytesFrom(s string, lo byte) bool {
 	}
 
 	return true
-}
-
-// validIdempotencyKey is 1–255 printable ASCII bytes that are not all spaces: what a header
-// carries intact and the engine accepts.
-func validIdempotencyKey(s string) bool {
-	return len(s) >= 1 && len(s) <= 255 && onlyBytesFrom(s, firstPrintable) && strings.Trim(s, " ") != ""
 }
 
 // refuse explains why this transport cannot send, or nil when it can. A nil or zero-value
@@ -128,11 +139,21 @@ func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
 	}
 
 	// [3] Attempt; retry only what mayRetry allows, honouring Retry-After.
+	var previous *Error // the error of the attempt before this one
+
 	for attempt := 0; ; attempt++ {
 		resp, after, err := t.attempt(ctx, c, payload)
 		if err == nil {
 			return resp, nil
 		}
+
+		// A retry that finds its own key in use means the attempt before it reached the engine and
+		// failed; that failure is what the caller needs to see, not the conflict.
+		if previous != nil && c.idempotencyKey != "" && err.Code == CodeIdempotencyConflict {
+			return nil, previous
+		}
+
+		previous = err
 
 		if attempt >= t.cfg.maxRetries || !mayRetry(c, err) {
 			return nil, err
@@ -239,7 +260,7 @@ func (t *transport) attempt(ctx context.Context, c call, payload []byte) (*http.
 	}
 
 	// [3] The header timeout covers only the wait for response headers.
-	timer := time.AfterFunc(t.cfg.headerTimeout, func() { cancelCause(errHeaderTimeout) })
+	timer := time.AfterFunc(t.headerTimeoutFor(c), func() { cancelCause(errHeaderTimeout) })
 
 	resp, err := t.cfg.httpClient.Do(req)
 	timer.Stop()
@@ -333,14 +354,16 @@ func (c *cancelOnClose) Close() error {
 // variable only so a test can lower it.
 var maxReplyBytes int64 = 64 << 20
 
-// hasErrorMember reports whether a JSON object has a top-level "error" member that is not null.
-// Anything that is not an object has none (the decoder refuses it afterwards).
+// hasErrorMember reports whether a JSON object has a top-level "error" member that is not null,
+// or a case variant of one (which the SDK cannot judge, so it is no result either). Anything that
+// is not an object has none (the decoder refuses it afterwards).
 func hasErrorMember(data []byte) bool {
-	var probe struct {
-		Error json.RawMessage `json:"error"`
+	var top map[string]json.RawMessage
+	if json.Unmarshal(data, &top) != nil {
+		return false
 	}
 
-	return json.Unmarshal(data, &probe) == nil && len(probe.Error) > 0 && string(probe.Error) != "null"
+	return hasCaseVariant(top, "error") || (len(top["error"]) > 0 && string(top["error"]) != "null")
 }
 
 // requestIDSetter is implemented by a reply type that carries the engine's request id.
@@ -349,9 +372,10 @@ type requestIDSetter interface{ setRequestID(string) }
 // send runs one call and decodes its JSON reply into a new T. It is the one place a buffered
 // reply is read, size-capped and decoded, so every reply fails the same way: a 204 for a call
 // that does not expect one (c.noContent gives a zero T), a literal null, a reply with an error
-// member where c.resultOnly says there must be none, and a body that is cut off, too large or not
-// the expected JSON are all a network_error, never an empty T with a nil error. The error's Message never quotes the body (it may hold a secret, such as an issued
-// key); its wrapped cause is the decoder's own error, which can name a field or a byte.
+// member (every result is an object without one), and a body that is cut off, too large or not
+// the expected JSON are all a network_error, never an empty T with a nil error. The error's
+// Message never quotes the body (it may hold a secret, such as an issued key); its wrapped cause
+// is the decoder's own error, which can name a field or a byte.
 func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 	// [1] Send, retrying as mayRetry allows.
 	resp, err := t.do(ctx, c)
@@ -389,8 +413,8 @@ func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 		}
 
 		// A reply that says "error" is not a result, whatever else it holds; decoding into a typed
-		// result would drop the member and let it pass as one.
-		if c.resultOnly && hasErrorMember(data) {
+		// result would drop the member and let it pass as one. This holds for every call.
+		if hasErrorMember(data) {
 			e := networkError(resp.StatusCode, "The engine's reply carried an error instead of a result.", nil)
 			e.RequestID = cleanRequestID(resp.Header.Get("X-Request-Id"))
 

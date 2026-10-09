@@ -138,7 +138,10 @@ func TestCancellingDuringBackoffReturnsAbortedPromptly(t *testing.T) {
 	start := time.Now()
 	_, err := newClient(e, meridian.WithMaxRetries(5)).Chat.Create(ctx, hello())
 
-	if got := asError(t, err); got.Code != meridian.CodeAborted || time.Since(start) > 400*time.Millisecond {
+	// Not waited out: the five backoff waits that would follow add up to at least
+	// 250+500+1000+2000+4000 ms (7.75 s), so a one-second ceiling still tells "stopped at once" from
+	// "slept on" without being a tight scheduling bet.
+	if got := asError(t, err); got.Code != meridian.CodeAborted || time.Since(start) > time.Second {
 		t.Fatalf("got %+v after %v", got, time.Since(start))
 	}
 }

@@ -20,6 +20,9 @@ type Reply struct {
 	HangBody    bool              // after the body, block until the request is cancelled
 	HangHeaders bool              // never answer; return the request context's error
 	Err         error             // fail the round trip, like a network error
+	// Blocked, if not nil, gets one value (never blocking the engine) when HangHeaders or HangBody
+	// has the request waiting, so a test can cancel at a known point instead of polling.
+	Blocked chan<- struct{}
 }
 
 // Request is what the engine received.
@@ -91,6 +94,7 @@ func (e *Engine) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	if rep.HangHeaders {
+		signal(rep.Blocked)
 		<-r.Context().Done()
 
 		return nil, r.Context().Err()
@@ -117,13 +121,22 @@ func (e *Engine) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 
 	return &http.Response{StatusCode: status, Status: http.StatusText(status), Header: header, Request: r,
-		ProtoMajor: 1, ProtoMinor: 1, Body: &pieceBody{ctx: r.Context(), pieces: pieces, hang: rep.HangBody}}, nil
+		ProtoMajor: 1, ProtoMinor: 1, Body: &pieceBody{ctx: r.Context(), pieces: pieces, hang: rep.HangBody, blocked: rep.Blocked}}, nil
+}
+
+// signal sends one value on ch if there is one, without ever blocking.
+func signal(ch chan<- struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }
 
 type pieceBody struct {
-	ctx    context.Context
-	pieces [][]byte
-	hang   bool
+	ctx     context.Context
+	pieces  [][]byte
+	hang    bool
+	blocked chan<- struct{}
 }
 
 func (b *pieceBody) Read(p []byte) (int, error) {
@@ -137,6 +150,7 @@ func (b *pieceBody) Read(p []byte) (int, error) {
 
 	if len(b.pieces) == 0 {
 		if b.hang {
+			signal(b.blocked)
 			<-b.ctx.Done()
 
 			return 0, b.ctx.Err()
