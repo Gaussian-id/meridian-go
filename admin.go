@@ -59,7 +59,8 @@ const reservedOrgID = "by-reference"
 // empty, all white space, "." or ".." (as given, or after one percent-decode) is refused, so no
 // id can climb to or collapse into another resource's route; so is an organisation id of
 // "by-reference", which the engine would route to the lookup by reference instead of to the
-// organisation's own resource. The messages never echo the segment.
+// organisation's own resource. The messages never echo the caller's segment beyond naming the
+// reserved id.
 func route(template string, segments ...string) (string, error) {
 	escaped := make([]any, len(segments))
 	orgFirst := strings.HasPrefix(template, orgRoutePrefix)

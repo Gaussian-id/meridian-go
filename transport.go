@@ -32,6 +32,7 @@ type call struct {
 	idempotencyKey string // sent on every attempt; the engine replays a repeat instead of running it twice
 	repeatable     bool   // a repeat is harmless although there is no idempotency key (the engine replays on a reference)
 	noContent      bool   // the operation answers 204 with no body (a DELETE); no other call accepts a 204
+	resultOnly     bool   // a 2xx body with a non-null top-level "error" member is not a result (chat)
 }
 
 type transport struct {
@@ -126,7 +127,7 @@ func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
 		payload = b
 	}
 
-	// [3] Attempt; retry only what the policy allows, honouring Retry-After.
+	// [3] Attempt; retry only what mayRetry allows, honouring Retry-After.
 	for attempt := 0; ; attempt++ {
 		resp, after, err := t.attempt(ctx, c, payload)
 		if err == nil {
@@ -332,14 +333,24 @@ func (c *cancelOnClose) Close() error {
 // variable only so a test can lower it.
 var maxReplyBytes int64 = 64 << 20
 
+// hasErrorMember reports whether a JSON object has a top-level "error" member that is not null.
+// Anything that is not an object has none (the decoder refuses it afterwards).
+func hasErrorMember(data []byte) bool {
+	var probe struct {
+		Error json.RawMessage `json:"error"`
+	}
+
+	return json.Unmarshal(data, &probe) == nil && len(probe.Error) > 0 && string(probe.Error) != "null"
+}
+
 // requestIDSetter is implemented by a reply type that carries the engine's request id.
 type requestIDSetter interface{ setRequestID(string) }
 
 // send runs one call and decodes its JSON reply into a new T. It is the one place a buffered
 // reply is read, size-capped and decoded, so every reply fails the same way: a 204 for a call
-// that does not expect one (c.noContent gives a zero T), a literal null, and a body that is cut
-// off, too large or not the expected JSON are all a network_error, never an empty T with a nil
-// error. The error's Message never quotes the body (it may hold a secret, such as an issued
+// that does not expect one (c.noContent gives a zero T), a literal null, a reply with an error
+// member where c.resultOnly says there must be none, and a body that is cut off, too large or not
+// the expected JSON are all a network_error, never an empty T with a nil error. The error's Message never quotes the body (it may hold a secret, such as an issued
 // key); its wrapped cause is the decoder's own error, which can name a field or a byte.
 func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 	// [1] Send, retrying as mayRetry allows.
@@ -375,6 +386,15 @@ func send[T any](ctx context.Context, t *transport, c call) (*T, error) {
 		// json.Unmarshal takes null as "nothing to set", which would leave a zero T.
 		if string(bytes.TrimSpace(data)) == "null" {
 			return nil, networkError(resp.StatusCode, "The engine's reply was empty (JSON null).", nil)
+		}
+
+		// A reply that says "error" is not a result, whatever else it holds; decoding into a typed
+		// result would drop the member and let it pass as one.
+		if c.resultOnly && hasErrorMember(data) {
+			e := networkError(resp.StatusCode, "The engine's reply carried an error instead of a result.", nil)
+			e.RequestID = cleanRequestID(resp.Header.Get("X-Request-Id"))
+
+			return nil, e
 		}
 
 		if jerr := json.Unmarshal(data, &out); jerr != nil {

@@ -79,7 +79,7 @@ type wireError struct {
 	Message   string `json:"message"`
 	Type      string `json:"type"`
 	Code      string `json:"code"`
-	RequestID string `json:"request_id"`
+	RequestID string `json:"request_id,omitempty"`
 	// Retryable is the raw JSON of an optional "retryable" member. It is only ever written as
 	// false ("do not retry this"; an SDK forwarding handler does, so a browser-side client does
 	// not retry a generic 503) and only the literal false is read back. It is kept raw so a
@@ -94,8 +94,8 @@ const jsonFalse = "false"
 // or as a stream frame. A browser must never see the SDK-only type, and learns "don't retry"
 // only for a code that would normally be retried; "retry" is never said.
 func toWire(e *Error) wireError {
-	// [1] The SDK-only type is shown as api_error.
-	w := wireError{Message: e.Message, Type: e.Type, Code: e.Code, RequestID: e.RequestID}
+	// [1] The SDK-only type is shown as api_error; an unusable request id is left out.
+	w := wireError{Message: e.Message, Type: e.Type, Code: e.Code, RequestID: cleanRequestID(e.RequestID)}
 	if w.Type == TypeClient {
 		w.Type = TypeAPI
 	}
@@ -106,6 +106,17 @@ func toWire(e *Error) wireError {
 	}
 
 	return w
+}
+
+// cleanRequestID is id when it is safe to show: 1–255 printable ASCII bytes (0x20–0x7E), which a
+// response header carries intact. Anything else is "" so a request id from the engine can never
+// add a header line or break one.
+func cleanRequestID(id string) string {
+	if len(id) < 1 || len(id) > 255 || !onlyBytesFrom(id, firstPrintable) {
+		return ""
+	}
+
+	return id
 }
 
 // parseEnvelope returns the error inside a Meridian envelope, or nil for anything else.
@@ -124,14 +135,15 @@ var knownTypes = []string{TypeInvalidRequest, TypeAuthentication, TypePermission
 // fromWire builds an Error from an envelope. status 0 means "use the engine's status for the code".
 // What this SDK does not recognise fails closed: a code it does not know is internal (the raw
 // code is kept in EngineCode, never in Message) and is not retried, and a type it does not know
-// is api_error. A newer engine can add a code about the app's own account; it must not look like
-// something harmless or retryable.
+// is api_error (so is the type of a code it folds into internal: the engine's own internal is an
+// api_error). A newer engine can add a code about the app's own account; it must not look like
+// something harmless or retryable. A request id that is not printable ASCII (1–255 bytes) is dropped.
 func fromWire(w *wireError, status int, headerID string) *Error {
 	// [1] Normalise the code and the type.
 	code, typ, engineCode := w.Code, w.Type, ""
 
 	if _, known := engineStatus[code]; !known {
-		code, engineCode = CodeInternal, w.Code
+		code, typ, engineCode = CodeInternal, TypeAPI, w.Code
 	}
 
 	if !slices.Contains(knownTypes, typ) {
@@ -143,9 +155,9 @@ func fromWire(w *wireError, status int, headerID string) *Error {
 		status = engineStatus[code]
 	}
 
-	id := w.RequestID
+	id := cleanRequestID(w.RequestID)
 	if id == "" {
-		id = headerID
+		id = cleanRequestID(headerID)
 	}
 
 	// [3] An explicit "retryable": false turns retries off; true, null or any other value changes nothing.
@@ -163,7 +175,7 @@ func errorFromResponse(resp *http.Response, body []byte) *Error {
 
 	e := networkError(resp.StatusCode,
 		fmt.Sprintf("The engine answered HTTP %d without a Meridian error body.", resp.StatusCode), nil)
-	e.RequestID = id
+	e.RequestID = cleanRequestID(id)
 
 	return e
 }
@@ -180,15 +192,16 @@ func frame(e *Error) []byte {
 // code, message and request id, with its HTTP status (502 when it has none, as a network or
 // configuration error does, or when the status is not an error status). It hides nothing, and
 // the SDK-only type client_error is written as api_error. An error that is not a *Error is an
-// internal error with no detail.
+// internal error with no detail (so is a nil *Error, however it is wrapped). A request id that is
+// not printable ASCII (1–255 bytes) is left out of the header and the body.
 //
 // A route that a browser or an app calls must not show it why your server failed (a missing key,
 // an unreachable engine, your own account's credit): use package forward, which applies the
 // generic 503, or choose what to show yourself.
 func WriteError(w http.ResponseWriter, err error) {
-	// [1] Anything that isn't a *Error is an internal failure.
+	// [1] Anything that isn't a *Error (a typed nil is one that isn't) is an internal failure.
 	var e *Error
-	if !errors.As(err, &e) {
+	if !errors.As(err, &e) || e == nil {
 		e = &Error{Code: CodeInternal, Type: TypeAPI, Status: http.StatusInternalServerError, Message: "Internal error."}
 	}
 
@@ -198,15 +211,16 @@ func WriteError(w http.ResponseWriter, err error) {
 		status = http.StatusBadGateway
 	}
 
-	// [3] Write the envelope.
+	// [3] Write the envelope; the header carries the same (cleaned) request id as the body.
+	body := toWire(e)
+
 	w.Header().Set("Content-Type", "application/json")
 
-	if e.RequestID != "" {
-		w.Header().Set("X-Request-Id", e.RequestID)
+	if body.RequestID != "" {
+		w.Header().Set("X-Request-Id", body.RequestID)
 	}
 
 	w.WriteHeader(status)
 
-	body := toWire(e)
 	_ = json.NewEncoder(w).Encode(envelope{Error: &body})
 }

@@ -34,14 +34,25 @@ type ChatStream struct {
 }
 
 func newChatStream(ctx context.Context, resp *http.Response) *ChatStream {
-	return &ChatStream{ctx: ctx, resp: resp, requestID: resp.Header.Get("X-Request-Id")}
+	return &ChatStream{ctx: ctx, resp: resp, requestID: cleanRequestID(resp.Header.Get("X-Request-Id"))}
 }
 
-// RequestID is the engine's request id for this stream.
-func (s *ChatStream) RequestID() string { return s.requestID }
+// RequestID is the engine's request id for this stream; empty when the engine sent none, or one
+// that is not printable ASCII (1–255 bytes).
+func (s *ChatStream) RequestID() string {
+	if s == nil {
+		return ""
+	}
+
+	return s.requestID
+}
 
 // Usage is the token counts reported at the end of the stream, or nil before then.
 func (s *ChatStream) Usage() *Usage {
+	if s == nil {
+		return nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -54,8 +65,13 @@ func (s *ChatStream) Usage() *Usage {
 	return &u
 }
 
-// Close stops the stream and cancels the upstream request. It is safe to call more than once.
+// Close stops the stream and cancels the upstream request. It is safe to call more than once,
+// and does nothing on a stream that was not returned by Chat.Stream (a zero or nil *ChatStream).
 func (s *ChatStream) Close() error {
+	if s == nil || s.resp == nil {
+		return nil
+	}
+
 	s.mu.Lock()
 	s.cancelled = true
 	s.mu.Unlock()
@@ -231,6 +247,10 @@ func (s *ChatStream) ServeSSE(w http.ResponseWriter, mapError func(*Error) *Erro
 }
 
 func (s *ChatStream) claim() *Error {
+	if s == nil || s.resp == nil {
+		return configError("This stream was not created by Chat.Stream.")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -284,8 +304,13 @@ const (
 )
 
 // decode classifies one event. Anything that has an "error" member is an error frame, so no
-// error can pass as a chunk; anything that is not a chat chunk is a malformed frame.
+// error can pass as a chunk; anything that is not a chat chunk is a malformed frame, and so is
+// an event of a type other than "message" (the engine sends none).
 func (s *ChatStream) decode(ev event) (frameKind, ChatChunk, *Error) {
+	if ev.eventType != "" && ev.eventType != "message" {
+		return frameFailed, ChatChunk{}, networkError(0, "The stream sent an event the SDK does not read.", nil)
+	}
+
 	if !ev.hasData {
 		return frameSkip, ChatChunk{}, nil
 	}
@@ -330,9 +355,10 @@ func (s *ChatStream) decode(ev event) (frameKind, ChatChunk, *Error) {
 }
 
 type event struct {
-	data    string // the joined data lines
-	hasData bool   // false for comment-only blocks and stray blank lines
-	raw     []byte // every byte read for this event, for byte-for-byte relay
+	data      string // the joined data lines
+	hasData   bool   // false for comment-only blocks and stray blank lines
+	eventType string // the last "event" field; "" is the default type, message
+	raw       []byte // every byte read for this event, for byte-for-byte relay
 }
 
 // eventReader parses server-sent events. Lines end in "\n", "\r\n" or a lone "\r"; a "\r" at
@@ -354,7 +380,7 @@ func newEventReader(r io.Reader) *eventReader {
 func (er *eventReader) next() (event, error) {
 	var raw, data []byte
 
-	hasData := false
+	hasData, eventType := false, ""
 
 	// [0] One leading UTF-8 byte order mark is not part of the first line (SSE spec). It stays
 	// in raw so a relay is byte for byte; a browser strips it the same way.
@@ -381,10 +407,10 @@ func (er *eventReader) next() (event, error) {
 
 		// [2] A blank line dispatches the event.
 		if len(line) == 0 {
-			return event{data: string(data), hasData: hasData, raw: raw}, nil
+			return event{data: string(data), hasData: hasData, eventType: eventType, raw: raw}, nil
 		}
 
-		// [3] Comments are skipped; only the data field matters.
+		// [3] Comments are skipped; only the data and event fields matter.
 		if line[0] == ':' {
 			continue
 		}
@@ -397,13 +423,16 @@ func (er *eventReader) next() (event, error) {
 			}
 		}
 
-		if string(field) == "data" {
+		switch string(field) {
+		case "data":
 			if hasData {
 				data = append(data, '\n')
 			}
 
 			data = append(data, value...)
 			hasData = true
+		case "event":
+			eventType = string(value)
 		}
 	}
 }

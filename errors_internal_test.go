@@ -165,6 +165,77 @@ func TestParseEnvelopeKeepsTheErrorWhateverTheRetryableFlagIs(t *testing.T) {
 	}
 }
 
+func TestAnUnrecognisedCodeIsAlwaysAnAPIError(t *testing.T) {
+	// The engine's own internal is api_error, so a code folded into internal is too, whatever type came with it.
+	for _, typ := range []string{TypeAuthentication, TypePermission, TypeRateLimit, TypeInvalidRequest, TypeClient, "made_up", ""} {
+		if e := fromWire(&wireError{Code: "novel", Type: typ}, 0, ""); e.Code != CodeInternal || e.Type != TypeAPI || e.EngineCode != "novel" {
+			t.Errorf("type %q: %+v", typ, e)
+		}
+	}
+
+	// A code it knows keeps the type it came with.
+	if e := fromWire(&wireError{Code: CodeInvalidAPIKey, Type: TypeAuthentication}, 401, ""); e.Type != TypeAuthentication {
+		t.Fatalf("got %+v", e)
+	}
+}
+
+func TestCleanRequestID(t *testing.T) {
+	for id, want := range map[string]string{
+		"": "", "r": "r", "req 1 ~!": "req 1 ~!", strings.Repeat("r", 255): strings.Repeat("r", 255),
+		strings.Repeat("r", 256): "", "a\r\nset-cookie: x=1": "", "a\nb": "", "a\tb": "", "a\x00b": "", "a\x7fb": "", "id-é": "",
+	} {
+		if got := cleanRequestID(id); got != want {
+			t.Errorf("%q: got %q, want %q", id, got, want)
+		}
+	}
+}
+
+func TestEveryEntryOfAnEngineRequestIDIsCleaned(t *testing.T) {
+	const bad = "a\r\nset-cookie: x=1"
+
+	// The id in the body, then the one in the header, then neither usable.
+	if e := fromWire(&wireError{Code: CodeRateLimited, Type: TypeRateLimit, RequestID: bad}, 429, "hdr"); e.RequestID != "hdr" {
+		t.Errorf("body id: %+v", e)
+	}
+
+	if e := fromWire(&wireError{Code: CodeRateLimited, Type: TypeRateLimit, RequestID: bad}, 429, bad); e.RequestID != "" {
+		t.Errorf("header id: %+v", e)
+	}
+
+	resp := &http.Response{StatusCode: 502, Header: http.Header{"X-Request-Id": {bad}}}
+	if e := errorFromResponse(resp, []byte("bad gateway")); e.RequestID != "" {
+		t.Errorf("non-envelope: %+v", e)
+	}
+
+	hdr := &http.Response{Header: http.Header{"X-Request-Id": {bad}}, Body: http.NoBody}
+	if s := newChatStream(context.Background(), hdr); s.RequestID() != "" {
+		t.Errorf("stream: %q", s.RequestID())
+	}
+
+	var c ChatCompletion
+
+	c.setRequestID(bad)
+
+	if c.RequestID != "" {
+		t.Errorf("completion: %q", c.RequestID)
+	}
+
+	c.setRequestID("rq-ok")
+
+	if c.RequestID != "rq-ok" {
+		t.Errorf("completion: %q", c.RequestID)
+	}
+}
+
+func TestAFrameOmitsAnUnusableRequestID(t *testing.T) {
+	for _, id := range []string{"", "a\r\nset-cookie: x=1"} {
+		got := string(frame(&Error{Code: CodeInternal, Type: TypeAPI, Message: "x", RequestID: id}))
+		if strings.Contains(got, "request_id") || strings.Contains(got, "set-cookie") {
+			t.Errorf("%q: %q", id, got)
+		}
+	}
+}
+
 func TestNilAndZeroTransportsRefuseInsteadOfPanicking(t *testing.T) {
 	for name, tr := range map[string]*transport{"nil": nil, "zero": {}, "no http client": {base: "http://engine.test"}} {
 		resp, err := tr.do(context.Background(), call{method: http.MethodGet, path: "/v1/models", accept: "application/json"})

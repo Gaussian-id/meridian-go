@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -107,7 +108,12 @@ func wantGeneric(t *testing.T, label string, body []byte, requestID string) {
 	t.Helper()
 
 	want := map[string]any{"message": "The service is temporarily unavailable.", "type": "api_error",
-		"code": "service_unavailable", "retryable": false, "request_id": requestID}
+		"code": "service_unavailable", "retryable": false}
+
+	// An unknown id is left out of the envelope, not sent as "".
+	if requestID != "" {
+		want["request_id"] = requestID
+	}
 
 	if got := errorOf(body); !reflect.DeepEqual(got, want) {
 		t.Errorf("%s: got %s", label, body)
@@ -661,14 +667,181 @@ func TestAMidStreamAppAccountFrameIsRewritten(t *testing.T) {
 }
 
 func TestAMidStreamPassThroughFrameIsRelayedAsItCame(t *testing.T) {
+	// internal is a code the SDK knows (the engine's own), so it is not mistaken for an unrecognised one.
+	for _, code := range []string{"upstream_unavailable", "internal"} {
+		e := fakeengine.New()
+		wire := fakeengine.SSE(fakeengine.Chunk("a"), string(fakeengine.Envelope(code, "provider down", "rq-u")))
+		e.On("POST", chatPath, fakeengine.Reply{Body: wire})
+
+		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+`,"stream":true}`))
+
+		if w.Body.String() != string(wire) {
+			t.Errorf("%s: relayed %q", code, w.Body.String())
+		}
+	}
+}
+
+func TestStreamContentTheGuardCannotJudgeEndsInTheGenericFrame(t *testing.T) {
+	chunk := fakeengine.Chunk("a")
+	first := string(fakeengine.SSE(chunk))
+	leaked := fakeengine.Chunk("leaked")
+
+	for name, c := range map[string]struct{ wire, relayed string }{
+		// An event the SDK does not read as a chat chunk.
+		"event: error":       {first + "event: error\ndata: " + leaked + "\n\n", first},
+		"event: custom":      {first + "event: custom\ndata: " + leaked + "\n\n", first},
+		"event with no data": {first + "event: ping\n\n", first},
+		"event: done":        {first + "event: end\ndata: [DONE]\n\n", first},
+		// Data that is not a JSON object.
+		"data: array":                      {first + "data: [1]\n\n", first},
+		"data: string":                     {first + `data: "leaked"` + "\n\n", first},
+		"data: number":                     {first + "data: 5\n\n", first},
+		"data: true":                       {first + "data: true\n\n", first},
+		"data: null":                       {first + "data: null\n\n", first},
+		"data: empty":                      {first + "data: \n\n", first},
+		"data: broken object":              {first + `data: {"choices"` + "\n\n", first},
+		"data: lower-case done":            {first + "data: [done]\n\n", first},
+		"data: an object that is no chunk": {first + `data: {"leaked":1}` + "\n\n", first},
+		// An error member that is not an object with a string code.
+		"error: string":            {first + `data: {"error":"leaked"}` + "\n\n", first},
+		"error: number":            {first + `data: {"error":5}` + "\n\n", first},
+		"error: true":              {first + `data: {"error":true}` + "\n\n", first},
+		"error: array":             {first + `data: {"error":[]}` + "\n\n", first},
+		"error: empty object":      {first + `data: {"error":{}}` + "\n\n", first},
+		"error: code is a number":  {first + `data: {"error":{"code":5,"type":"api_error"}}` + "\n\n", first},
+		"error: empty code":        {first + `data: {"error":{"code":"","type":"api_error"}}` + "\n\n", first},
+		"error: and a chunk":       {first + `data: {"error":"leaked","choices":[{"index":0,"delta":{"content":"x"}}]}` + "\n\n", first},
+		"error: null and no chunk": {first + `data: {"error":null}` + "\n\n", first},
+		// A body that ends without a data line.
+		"empty body":          {"", ""},
+		"comments only":       {": keepalive\n\n", ": keepalive\n\n"},
+		"a field but no data": {"retry: 3000\n\n", "retry: 3000\n\n"},
+		"cut mid-line":        {"data", ""},
+	} {
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: []byte(c.wire), Header: map[string]string{"Content-Type": "text/event-stream"}})
+
+		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+`,"stream":true}`))
+		body := w.Body.String()
+
+		// What came before is relayed as it came, then exactly one frame: the generic one.
+		if !strings.HasPrefix(body, c.relayed) || strings.Count(strings.TrimPrefix(body, c.relayed), "\n\n") != 1 ||
+			strings.Contains(body, "[DONE]") || strings.Contains(body, "leaked") {
+			t.Errorf("%s: relayed %q", name, body)
+		}
+
+		wantGeneric(t, name, lastFrame(body), "")
+
+		// The upstream request is closed, not left running.
+		if reqs := e.Requests(); len(reqs) != 1 || reqs[0].Context.Err() == nil {
+			t.Errorf("%s: the upstream request must be cancelled", name)
+		}
+	}
+}
+
+func TestAnErrorMemberOnABufferedReplyIsAGeneric503(t *testing.T) {
+	rest := strings.TrimPrefix(string(fakeengine.Completion("ok")), "{")
+
+	for name, member := range map[string]string{
+		"string": `"leaked"`, "empty string": `""`, "number": `5`, "zero": `0`, "true": `true`, "false": `false`,
+		"empty object": `{}`, "array": `[]`,
+		"envelope": `{"message":"leaked","type":"api_error","code":"insufficient_credit","request_id":"rq"}`,
+	} {
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: []byte(`{"error":` + member + "," + rest), Header: map[string]string{"X-Request-Id": "rq-e"}})
+
+		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+"}"))
+
+		if w.Code != 503 || strings.Contains(w.Body.String(), "leaked") || strings.Contains(w.Body.String(), "insufficient_credit") ||
+			strings.Contains(w.Body.String(), `"ok"`) || w.Header().Get("X-Request-Id") != "rq-e" {
+			t.Errorf("%s: %d %v %s", name, w.Code, w.Header(), w.Body.String())
+		}
+
+		wantGeneric(t, name, w.Body.Bytes(), "rq-e")
+	}
+
+	// A null member is no error.
 	e := fakeengine.New()
-	wire := fakeengine.SSE(fakeengine.Chunk("a"), string(fakeengine.Envelope("upstream_unavailable", "provider down", "rq-u")))
-	e.On("POST", chatPath, fakeengine.Reply{Body: wire})
+	e.On("POST", chatPath, fakeengine.Reply{Body: []byte(`{"error":null,` + rest)})
 
-	w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+`,"stream":true}`))
+	if w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+"}")); w.Code != 200 || !strings.Contains(w.Body.String(), `"ok"`) {
+		t.Errorf("null error member: %d %s", w.Code, w.Body.String())
+	}
+}
 
-	if w.Body.String() != string(wire) {
-		t.Fatalf("relayed %q", w.Body.String())
+func TestAnUnsafeRequestIDNeverReachesAHeaderOrABody(t *testing.T) {
+	// A CRLF would let an engine reply add a header of its own; an over-long or non-ASCII id is no id.
+	for name, id := range map[string]string{"CRLF and a header": "a\r\nset-cookie: x=1", "256 bytes": strings.Repeat("r", 256),
+		"non-ASCII": "id-é", "a control character": "a\x00b"} {
+		check := func(label string, w *httptest.ResponseRecorder, body []byte) {
+			t.Helper()
+
+			if w.Header().Get("X-Request-Id") != "" || len(w.Header().Values("Set-Cookie")) != 0 ||
+				strings.Contains(string(body), "request_id") || strings.Contains(strings.ToLower(string(body)), "set-cookie") {
+				t.Errorf("%s, %s: %v %s", name, label, w.Header(), body)
+			}
+		}
+
+		header := map[string]string{"X-Request-Id": id}
+
+		for _, body := range []string{msgs + "}", msgs + `,"stream":true}`} {
+			// A pass-through error (the engine's own code), then one that becomes the generic 503.
+			for _, code := range []string{"rate_limited", "insufficient_credit"} {
+				e := fakeengine.New()
+				e.On("POST", chatPath, fakeengine.Reply{Status: 429, Body: fakeengine.Envelope(code, "m", id), Header: header})
+
+				w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(body))
+				check(code+", "+body, w, w.Body.Bytes())
+			}
+		}
+
+		// A good reply whose header is unusable: relayed, without the header.
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: fakeengine.Completion("ok"), Header: header})
+
+		w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+"}"))
+		if w.Code != 200 || w.Header().Get("X-Request-Id") != "" || len(w.Header().Values("Set-Cookie")) != 0 {
+			t.Errorf("%s, buffered success: %d %v", name, w.Code, w.Header())
+		}
+
+		e = fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: fakeengine.SSE(fakeengine.Chunk("a"), "[DONE]"), Header: header})
+
+		w = serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+`,"stream":true}`))
+		if w.Code != 200 || w.Header().Get("X-Request-Id") != "" || len(w.Header().Values("Set-Cookie")) != 0 {
+			t.Errorf("%s, streamed success: %d %v", name, w.Code, w.Header())
+		}
+
+		// An error frame the SDK re-encodes (the generic one) carries no such id.
+		e = fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: fakeengine.SSE(fakeengine.Chunk("a"), string(fakeengine.Envelope("insufficient_credit", "m", id)))})
+
+		w = serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+`,"stream":true}`))
+		wantGeneric(t, name+", mid-stream", lastFrame(w.Body.String()), "")
+	}
+
+	// A good id still goes through.
+	e := fakeengine.New()
+	e.On("POST", chatPath, fakeengine.Reply{Status: 429, Body: fakeengine.Envelope("rate_limited", "m", strings.Repeat("r", 255)),
+		Header: map[string]string{"X-Request-Id": strings.Repeat("r", 255)}})
+
+	if w := serve(handler(t, e, allowAll, forward.AllowRule{}), post(msgs+"}")); w.Header().Get("X-Request-Id") != strings.Repeat("r", 255) {
+		t.Errorf("a 255-byte id is allowed: %v", w.Header())
+	}
+}
+
+func TestAHugeMaxTokensCapIsClampedToTheInt32Range(t *testing.T) {
+	const maxInt = int(^uint(0) >> 1)
+
+	for _, body := range []string{msgs + "}", msgs + `,"max_tokens":9223372036854775807}`, msgs + `,"max_tokens":1e300}`} {
+		e := fakeengine.New()
+		e.On("POST", chatPath, fakeengine.Reply{Body: fakeengine.Completion("ok")})
+
+		serve(handler(t, e, allowAll, forward.AllowRule{MaxTokensCap: maxInt}), post(body))
+
+		if got := engineBody(t, e)["max_tokens"]; got != float64(math.MaxInt32) {
+			t.Errorf("%s: max_tokens %v, want %d", body, got, math.MaxInt32)
+		}
 	}
 }
 

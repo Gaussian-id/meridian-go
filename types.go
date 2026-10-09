@@ -111,7 +111,7 @@ type ChatCompletion struct {
 }
 
 // setRequestID is called by send with the X-Request-Id header.
-func (c *ChatCompletion) setRequestID(id string) { c.RequestID = id }
+func (c *ChatCompletion) setRequestID(id string) { c.RequestID = cleanRequestID(id) }
 
 // Text is the first choice's content, or "".
 func (c *ChatCompletion) Text() string {

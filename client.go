@@ -45,7 +45,7 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 	}
 
 	return send[ChatCompletion](ctx, s.tr(), call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
-		idempotencyKey: idem})
+		idempotencyKey: idem, resultOnly: true})
 }
 
 // Stream sends a chat request and returns the reply as a stream. Usage is always requested.

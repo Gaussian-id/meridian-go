@@ -53,7 +53,8 @@ type AllowRule struct {
 	// Options are extra request fields the browser may send, by name. messages, model, stream,
 	// stream_options, max_tokens, max_completion_tokens and temperature are never copied raw.
 	Options []string
-	// MaxTokensCap caps max_tokens; 0 or less means DefaultMaxTokensCap.
+	// MaxTokensCap caps max_tokens; 0 or less means DefaultMaxTokensCap, and a value above
+	// math.MaxInt32 (the engine's range) is lowered to math.MaxInt32.
 	MaxTokensCap int
 }
 
@@ -84,7 +85,8 @@ var (
 )
 
 // neverRaw are the fields the handler decides itself; AllowRule.Options can never copy them.
-// max_completion_tokens is here because it would lift the max_tokens cap.
+// max_completion_tokens is here for consistency with the cap: the engine applies the smaller of it
+// and max_tokens, so a browser could not lift the cap with it, but the handler states one limit.
 var neverRaw = map[string]bool{"messages": true, "model": true, "stream": true, "stream_options": true,
 	"max_tokens": true, "max_completion_tokens": true, "temperature": true}
 
@@ -112,6 +114,8 @@ func New(o Options) (http.Handler, error) {
 	if o.Allow.MaxTokensCap <= 0 {
 		o.Allow.MaxTokensCap = DefaultMaxTokensCap
 	}
+
+	o.Allow.MaxTokensCap = int(min(int64(o.Allow.MaxTokensCap), math.MaxInt32))
 
 	o.Allow.Options = slices.Clone(o.Allow.Options)
 
