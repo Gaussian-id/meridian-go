@@ -57,6 +57,8 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 		return nil, derr
 	}
 
+	out.RequestID = resp.Header.Get("X-Request-Id")
+
 	return &out, nil
 }
 

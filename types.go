@@ -105,6 +105,9 @@ type ChatCompletion struct {
 	Model   string       `json:"model"`
 	Choices []ChatChoice `json:"choices"`
 	Usage   Usage        `json:"usage"`
+
+	// RequestID is the engine's request id (the X-Request-Id header), not part of the reply body.
+	RequestID string `json:"-"`
 }
 
 // Text is the first choice's content, or "".

@@ -66,6 +66,20 @@ func TestCreateReturnsTheReplyAndThreeTokenCounts(t *testing.T) {
 	}
 }
 
+func TestCreateReportsTheRequestIDOutsideTheReply(t *testing.T) {
+	e := fakeengine.New()
+	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Body: fakeengine.Completion("ok"), Header: map[string]string{"X-Request-Id": "rq-c"}})
+
+	got, err := newClient(e).Chat.Create(context.Background(), hello())
+	if err != nil || got.RequestID != "rq-c" {
+		t.Fatalf("%v %+v", err, got)
+	}
+
+	if b, _ := json.Marshal(got); strings.Contains(string(b), "rq-c") {
+		t.Fatalf("the request id is not part of the reply body: %s", b)
+	}
+}
+
 func TestCreateSendsNoModelSoMeridianChooses(t *testing.T) {
 	e := fakeengine.New()
 	e.On("POST", "/v1/chat/completions", fakeengine.Reply{Body: fakeengine.Completion("ok")})
