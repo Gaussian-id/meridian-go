@@ -199,9 +199,9 @@ type Model struct {
 }
 
 // key is the idempotency key for this call.
-func (p ChatParams) key() string {
+func (p ChatParams) key() (string, *Error) {
 	if p.IdempotencyKey != "" {
-		return p.IdempotencyKey
+		return p.IdempotencyKey, nil
 	}
 
 	return newIdempotencyKey()

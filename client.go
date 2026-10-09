@@ -29,8 +29,13 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 		return nil, berr
 	}
 
+	idem, kerr := p.key()
+	if kerr != nil {
+		return nil, kerr
+	}
+
 	resp, err := s.t.do(ctx, call{method: http.MethodPost, path: "/v1/chat/completions", body: body,
-		accept: "application/json", idempotencyKey: p.key(), policy: retryRetryable})
+		accept: "application/json", idempotencyKey: idem, policy: retryRetryable})
 	if err != nil {
 		return nil, err
 	}

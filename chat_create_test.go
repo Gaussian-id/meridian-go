@@ -232,3 +232,71 @@ func TestOptionsAreSanitised(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHeaderTimeoutIsARetryableNetworkErrorNotACancel(t *testing.T) {
+	e := fakeengine.New()
+	e.On("POST", "/v1/chat/completions", fakeengine.Reply{HangHeaders: true})
+
+	_, err := newClient(e, meridian.WithHeaderTimeout(10*time.Millisecond), meridian.WithMaxRetries(0)).
+		Chat.Create(context.Background(), hello())
+	got := asError(t, err)
+
+	if got.Code != meridian.CodeNetworkError || !got.Retryable {
+		t.Fatalf("got %+v", got)
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("a header timeout the caller did not cause must not look like a context error")
+	}
+}
+
+func TestCallerCancelWhileWaitingForHeadersIsAborted(t *testing.T) {
+	e := fakeengine.New()
+	e.On("POST", "/v1/chat/completions", fakeengine.Reply{HangHeaders: true})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := newClient(e).Chat.Create(ctx, hello())
+		done <- err
+	}()
+
+	for len(e.Requests()) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+
+	err := <-done
+	if got := asError(t, err); got.Code != meridian.CodeAborted || !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestRefusalIsACopyPerCall(t *testing.T) {
+	c := meridian.NewClient("ftp://engine.test", projectKey)
+
+	_, err1 := c.Models.List(context.Background())
+	asError(t, err1).Message = "mutated"
+
+	_, err2 := c.Models.List(context.Background())
+	if asError(t, err2).Message == "mutated" {
+		t.Fatal("calls share one refusal error")
+	}
+}
+
+func TestBaseURLWithQueryFragmentOrUserinfoIsRefused(t *testing.T) {
+	e := fakeengine.New()
+
+	for _, u := range []string{engineURL + "?a=1", engineURL + "#frag", "http://user:pw@engine.test"} {
+		_, err := meridian.NewClient(u, projectKey, meridian.WithHTTPClient(e.Client())).Models.List(context.Background())
+		if got := asError(t, err); got.Code != meridian.CodeInvalidRequest || got.Type != meridian.TypeClient {
+			t.Errorf("%s: got %+v", u, got)
+		}
+	}
+
+	if len(e.Requests()) != 0 {
+		t.Fatal("a refused client sent a request")
+	}
+}

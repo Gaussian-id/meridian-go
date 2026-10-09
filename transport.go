@@ -6,14 +6,18 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
+
+// errHeaderTimeout is the cancellation cause of an attempt that waited too long for headers.
+// It is private so a header timeout never satisfies errors.Is(err, context.Canceled).
+var errHeaderTimeout = errors.New("meridian: header timeout")
 
 type retryPolicy int
 
@@ -46,6 +50,8 @@ func newTransport(rawURL, key string, cfg config) *transport {
 	switch {
 	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
 		t.refusal = configError("The Meridian URL must be an absolute http or https URL.")
+	case u.RawQuery != "" || u.Fragment != "" || u.User != nil:
+		t.refusal = configError("The Meridian URL must not contain a query, fragment or credentials.")
 	case strings.TrimSpace(key) == "":
 		t.refusal = configError("A Meridian key is required.")
 	default:
@@ -59,7 +65,9 @@ func newTransport(rawURL, key string, cfg config) *transport {
 func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
 	// [1] A refused client sends nothing.
 	if t.refusal != nil {
-		return nil, t.refusal
+		refusal := *t.refusal
+
+		return nil, &refusal
 	}
 
 	// [2] Encode the body once; every attempt resends the same bytes.
@@ -94,7 +102,8 @@ func (t *transport) attempt(ctx context.Context, c call, payload []byte) (*http.
 		target += "?" + c.query.Encode()
 	}
 
-	attemptCtx, cancel := context.WithCancel(ctx)
+	attemptCtx, cancelCause := context.WithCancelCause(ctx)
+	cancel := func() { cancelCause(nil) }
 
 	var body io.Reader
 	if payload != nil {
@@ -121,30 +130,25 @@ func (t *transport) attempt(ctx context.Context, c call, payload []byte) (*http.
 	}
 
 	// [3] The header timeout covers only the wait for response headers.
-	var timedOut atomic.Bool
-
-	timer := time.AfterFunc(t.cfg.headerTimeout, func() {
-		timedOut.Store(true)
-		cancel()
-	})
+	timer := time.AfterFunc(t.cfg.headerTimeout, func() { cancelCause(errHeaderTimeout) })
 
 	resp, err := t.cfg.httpClient.Do(req)
 	timer.Stop()
 
-	if err == nil && timedOut.Load() {
+	timedOut := errors.Is(context.Cause(attemptCtx), errHeaderTimeout)
+	if err == nil && timedOut {
 		_ = resp.Body.Close()
-		err = context.DeadlineExceeded
 	}
 
-	if err != nil {
+	if err != nil || timedOut {
 		cancel()
 
 		if ctx.Err() != nil {
 			return nil, -1, abortedError(ctx.Err())
 		}
 
-		if timedOut.Load() {
-			return nil, -1, networkError(0, "The engine did not answer within the header timeout.", err)
+		if timedOut {
+			return nil, -1, networkError(0, "The engine did not answer within the header timeout.", errHeaderTimeout)
 		}
 
 		return nil, -1, networkError(0, "The engine could not be reached.", err)
@@ -234,9 +238,11 @@ func decodeJSON(ctx context.Context, resp *http.Response, v any) *Error {
 	return nil
 }
 
-func newIdempotencyKey() string {
+func newIdempotencyKey() (string, *Error) {
 	var b [16]byte
-	_, _ = crand.Read(b[:])
+	if _, err := crand.Read(b[:]); err != nil {
+		return "", networkError(0, "The system could not produce a random idempotency key.", err)
+	}
 
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }
