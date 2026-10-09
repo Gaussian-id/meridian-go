@@ -2,6 +2,7 @@ package meridian_test
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -349,5 +350,87 @@ func TestServeSSERecordsUsageAndReadsOnce(t *testing.T) {
 
 	if err := s.ServeSSE(httptest.NewRecorder(), nil); asError(t, err).Code != meridian.CodeAborted {
 		t.Fatal("a stream can be read once")
+	}
+}
+
+func TestAHookThatEditsItsArgumentInPlaceStillReplacesTheFrame(t *testing.T) {
+	s, _ := streamOf(t, fakeengine.Reply{Body: fakeengine.SSE(string(fakeengine.Envelope("insufficient_credit", "No credit.", "r9")))})
+	w := httptest.NewRecorder()
+
+	err := s.ServeSSE(w, func(e *meridian.Error) *meridian.Error {
+		e.Code, e.Type, e.Status, e.Message = meridian.CodeServiceUnavailable, meridian.TypeAPI, 503, "The service is temporarily unavailable."
+
+		return e
+	})
+
+	if got := asError(t, err); got.Code != meridian.CodeInsufficientCredit || got.Message != "No credit." {
+		t.Fatalf("the caller's error must be unchanged, got %+v", got)
+	}
+
+	if out := w.Body.String(); strings.Contains(out, "insufficient_credit") || strings.Contains(out, "No credit.") ||
+		!strings.Contains(out, "service_unavailable") {
+		t.Fatalf("relayed %q", out)
+	}
+}
+
+func TestALeadingByteOrderMarkIsStrippedAndNeverHidesAFrame(t *testing.T) {
+	const bom = "\xEF\xBB\xBF"
+
+	s, _ := streamOf(t, fakeengine.Reply{Body: []byte(bom + string(fakeengine.SSE(fakeengine.Chunk("ok"), "[DONE]")))})
+	if got, err := s.Text(); err != nil || got != "ok" {
+		t.Fatalf("got %q err %v", got, err)
+	}
+
+	// The BOM split from the rest of the first event, one byte at a time.
+	s2, _ := streamOf(t, fakeengine.Reply{Pieces: [][]byte{{0xEF}, {0xBB}, {0xBF}, fakeengine.SSE(fakeengine.Chunk("ok"), "[DONE]")}})
+	if got, err := s2.Text(); err != nil || got != "ok" {
+		t.Fatalf("split: got %q err %v", got, err)
+	}
+
+	errFrame := bom + string(fakeengine.SSE(string(fakeengine.Envelope("insufficient_credit", "No credit.", "r10"))))
+
+	s3, _ := streamOf(t, fakeengine.Reply{Body: []byte(errFrame)})
+	if _, err := s3.Text(); asError(t, err).Code != meridian.CodeInsufficientCredit {
+		t.Fatalf("a BOM-prefixed error frame must be a typed error, got %v", err)
+	}
+
+	s4, _ := streamOf(t, fakeengine.Reply{Body: []byte(errFrame)})
+	w := httptest.NewRecorder()
+
+	err := s4.ServeSSE(w, toGeneric503)
+	if asError(t, err).Code != meridian.CodeInsufficientCredit ||
+		strings.Contains(w.Body.String(), "insufficient_credit") || !strings.Contains(w.Body.String(), "service_unavailable") {
+		t.Fatalf("err %v relayed %q", err, w.Body.String())
+	}
+}
+
+// wrapped hides the recorder's Flush method, as middleware writers do, but exposes Unwrap.
+type wrapped struct{ inner *httptest.ResponseRecorder }
+
+func (w wrapped) Header() http.Header         { return w.inner.Header() }
+func (w wrapped) Write(b []byte) (int, error) { return w.inner.Write(b) }
+func (w wrapped) WriteHeader(code int)        { w.inner.WriteHeader(code) }
+func (w wrapped) Unwrap() http.ResponseWriter { return w.inner }
+
+// bare supports neither Flush nor Unwrap.
+type bare struct{ inner *httptest.ResponseRecorder }
+
+func (w bare) Header() http.Header         { return w.inner.Header() }
+func (w bare) Write(b []byte) (int, error) { return w.inner.Write(b) }
+func (w bare) WriteHeader(code int)        { w.inner.WriteHeader(code) }
+
+func TestServeSSEFlushesThroughWrappedWritersAndToleratesNoFlush(t *testing.T) {
+	s, _ := streamOf(t, ok(fakeengine.Chunk("a")))
+	rec := httptest.NewRecorder()
+
+	if err := s.ServeSSE(wrapped{rec}, nil); err != nil || !rec.Flushed {
+		t.Fatalf("err %v flushed %v", err, rec.Flushed)
+	}
+
+	s2, _ := streamOf(t, ok(fakeengine.Chunk("a")))
+	rec2 := httptest.NewRecorder()
+
+	if err := s2.ServeSSE(bare{rec2}, nil); err != nil || !strings.Contains(rec2.Body.String(), "[DONE]") {
+		t.Fatalf("err %v body %q", err, rec2.Body.String())
 	}
 }

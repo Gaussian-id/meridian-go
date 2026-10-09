@@ -51,6 +51,8 @@ func (s *ChatService) Create(ctx context.Context, p ChatParams) (*ChatCompletion
 }
 
 // Stream sends a chat request and returns the reply as a stream. Usage is always requested.
+// Cancelling ctx stops the stream, so a handler relaying to a browser should pass r.Context().
+// Close a stream you do not read.
 func (s *ChatService) Stream(ctx context.Context, p ChatParams) (*ChatStream, error) {
 	body, berr := p.body(true)
 	if berr != nil {

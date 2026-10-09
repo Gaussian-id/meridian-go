@@ -15,11 +15,13 @@ import (
 
 // maxEventBytes bounds one event so a hostile or broken upstream cannot exhaust memory. An
 // event over the bound ends the stream with a network error; it is never relayed unchecked.
-const maxEventBytes = 16 << 20
+var maxEventBytes = 16 << 20
 
 var errEventTooLarge = errors.New("meridian: stream event too large")
 
-// ChatStream is one streamed chat reply. Read it once, with Chunks, Text or ServeSSE.
+// ChatStream is one streamed chat reply. Read it once, with Chunks, Text or ServeSSE. Reading
+// to the end or breaking out of Chunks releases the connection; a stream that is never read
+// must be released with Close.
 type ChatStream struct {
 	ctx       context.Context
 	resp      *http.Response
@@ -130,10 +132,15 @@ func (s *ChatStream) Text() (string, error) {
 // real error that ended it (nil after [DONE]). Use it from your own route handler.
 //
 // mapError, if not nil, sees every error that ends the stream: an engine error frame, a
-// malformed frame, a dropped connection or a cancellation. If it returns a different non-nil
-// *Error, that error is relayed as a final error frame instead of the original; the frame that
-// carried the original error is never written. With a nil mapError engine error frames are
-// relayed as they came, and an SDK-side failure writes nothing more (the stream just stops).
+// malformed frame, a dropped connection or a cancellation. It receives a copy; any non-nil
+// *Error it returns (a new one, or the copy edited in place) is relayed as a final error frame
+// instead of the original, and the frame that carried the original error is never written.
+// Returning nil leaves an engine error frame as it came. With a nil mapError engine error
+// frames are relayed as they came, and an SDK-side failure writes nothing more (the stream just
+// stops).
+//
+// Pass the incoming request's context (r.Context()) to Chat.Stream so a browser disconnect
+// cancels the upstream request.
 func (s *ChatStream) ServeSSE(w http.ResponseWriter, mapError func(*Error) *Error) error {
 	// [1] A stream can be read once.
 	if err := s.claim(); err != nil {
@@ -153,26 +160,29 @@ func (s *ChatStream) ServeSSE(w http.ResponseWriter, mapError func(*Error) *Erro
 
 	w.WriteHeader(http.StatusOK)
 
-	flusher, _ := w.(http.Flusher)
+	// The controller finds Flush through middleware wrappers that expose Unwrap; a writer that
+	// cannot flush is not an error, its output just arrives later.
+	rc := http.NewResponseController(w)
 	write := func(b []byte) *Error {
 		if _, werr := w.Write(b); werr != nil {
 			return networkError(0, "The client went away.", werr)
 		}
 
-		if flusher != nil {
-			flusher.Flush()
-		}
+		_ = rc.Flush()
 
 		return nil
 	}
 
 	// finish ends the relay with err. raw is the engine's own error frame, or nil for an SDK-side
-	// failure; the hook's replacement frame, if any, is written instead of raw.
+	// failure; the hook's replacement frame, if any, is written instead of raw. The hook gets a
+	// copy, so editing it in place can neither change the error ServeSSE returns nor be ignored.
 	finish := func(err *Error, raw []byte) error {
 		out := raw
 
 		if mapError != nil {
-			if m := mapError(err); m != nil && m != err {
+			c := *err
+
+			if m := mapError(&c); m != nil {
 				out = frame(m)
 			}
 		}
@@ -328,7 +338,12 @@ type event struct {
 // eventReader parses server-sent events. Lines end in "\n", "\r\n" or a lone "\r"; a "\r" at
 // the end of a read is held until the next byte shows whether "\n" follows. Bytes become a
 // string only when an event is complete, so a multi-byte character split across reads is intact.
-type eventReader struct{ r *bufio.Reader }
+type eventReader struct {
+	r       *bufio.Reader
+	started bool
+}
+
+const bom = "\xEF\xBB\xBF"
 
 func newEventReader(r io.Reader) *eventReader {
 	return &eventReader{r: bufio.NewReaderSize(r, 64<<10)}
@@ -340,6 +355,19 @@ func (er *eventReader) next() (event, error) {
 	var raw, data []byte
 
 	hasData := false
+
+	// [0] One leading UTF-8 byte order mark is not part of the first line (SSE spec). It stays
+	// in raw so a relay is byte for byte; a browser strips it the same way.
+	if !er.started {
+		er.started = true
+
+		if b, _ := er.r.Peek(1); len(b) == 1 && b[0] == bom[0] {
+			if b, _ := er.r.Peek(len(bom)); string(b) == bom {
+				raw = append(raw, bom...)
+				_, _ = er.r.Discard(len(bom))
+			}
+		}
+	}
 
 	for {
 		// [1] One line and its terminator.
