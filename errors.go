@@ -76,10 +76,15 @@ type wireError struct {
 	Type      string `json:"type"`
 	Code      string `json:"code"`
 	RequestID string `json:"request_id"`
-	// Retryable is only ever written as false: "do not retry this". The engine does not send it;
-	// an SDK forwarding handler does, so a browser-side client does not retry a generic 503.
-	Retryable *bool `json:"retryable,omitempty"`
+	// Retryable is the raw JSON of an optional "retryable" member. It is only ever written as
+	// false ("do not retry this"; an SDK forwarding handler does, so a browser-side client does
+	// not retry a generic 503) and only the literal false is read back. It is kept raw so a
+	// value of any other type cannot make the whole envelope fail to decode.
+	Retryable json.RawMessage `json:"retryable,omitempty"`
 }
+
+// jsonFalse is the one "retryable" value that is ever written or acted on.
+const jsonFalse = "false"
 
 // toWire is the one encoder for an error that leaves the process, as an HTTP body (WriteError)
 // or as a stream frame. A browser must never see the SDK-only type, and learns "don't retry"
@@ -93,8 +98,7 @@ func toWire(e *Error) wireError {
 
 	// [2] Deny a retry the code would otherwise invite.
 	if !e.Retryable && retryableCodes[e.Code] {
-		no := false
-		w.Retryable = &no
+		w.Retryable = json.RawMessage(jsonFalse)
 	}
 
 	return w
@@ -122,9 +126,9 @@ func fromWire(w *wireError, status int, headerID string) *Error {
 		id = headerID
 	}
 
-	// An explicit "retryable": false turns retries off; true never turns them on.
+	// An explicit "retryable": false turns retries off; true, null or any other value changes nothing.
 	retryable := retryableCodes[w.Code] || (!known && (status == http.StatusTooManyRequests || status >= 500))
-	if w.Retryable != nil && !*w.Retryable {
+	if string(w.Retryable) == jsonFalse {
 		retryable = false
 	}
 

@@ -55,7 +55,7 @@ func newTransport(rawURL, key string, cfg config) *transport {
 		t.refusal = configError("The Meridian URL must not contain a query, fragment or credentials.")
 	case strings.TrimSpace(key) == "":
 		t.refusal = configError("A Meridian key is required.")
-	case !onlyBytesFrom(key, '!'):
+	case !onlyBytesFrom(key, firstVisible):
 		// Never echo the key. A trailing newline from a secret file is the usual cause.
 		t.refusal = configError("The Meridian key has a space, control or non-ASCII character " +
 			"(a trailing newline from a secret file?); it cannot be sent as a header.")
@@ -66,10 +66,18 @@ func newTransport(rawURL, key string, cfg config) *transport {
 	return t
 }
 
-// onlyBytesFrom reports whether every byte of s is between lo and '~' (0x7E).
+// The ASCII range a header value can carry intact. A key has no spaces, so it starts at
+// firstVisible; an idempotency key may contain spaces, so it starts at firstPrintable.
+const (
+	firstPrintable = ' ' // 0x20
+	firstVisible   = '!' // 0x21
+	lastPrintable  = '~' // 0x7E
+)
+
+// onlyBytesFrom reports whether every byte of s is between lo and lastPrintable.
 func onlyBytesFrom(s string, lo byte) bool {
 	for i := range len(s) {
-		if s[i] < lo || s[i] > '~' {
+		if s[i] < lo || s[i] > lastPrintable {
 			return false
 		}
 	}
@@ -80,7 +88,7 @@ func onlyBytesFrom(s string, lo byte) bool {
 // validIdempotencyKey is 1–255 printable ASCII bytes that are not all spaces: what a header
 // carries intact and the engine accepts.
 func validIdempotencyKey(s string) bool {
-	return len(s) >= 1 && len(s) <= 255 && onlyBytesFrom(s, ' ') && strings.Trim(s, " ") != ""
+	return len(s) >= 1 && len(s) <= 255 && onlyBytesFrom(s, firstPrintable) && strings.Trim(s, " ") != ""
 }
 
 // refuse explains why this transport cannot send, or nil when it can. A nil or zero-value

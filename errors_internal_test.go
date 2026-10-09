@@ -89,15 +89,15 @@ func TestToWireNeverShowsTheSDKOnlyType(t *testing.T) {
 
 func TestToWireSaysDontRetryOnlyForACodeThatWouldBeRetried(t *testing.T) {
 	no := toWire(&Error{Code: CodeServiceUnavailable, Type: TypeAPI, Retryable: false})
-	if no.Retryable == nil || *no.Retryable {
-		t.Fatalf("a non-retryable service_unavailable must say retryable:false, got %v", no.Retryable)
+	if string(no.Retryable) != "false" {
+		t.Fatalf("a non-retryable service_unavailable must say retryable:false, got %q", no.Retryable)
 	}
 
-	if toWire(&Error{Code: CodeServiceUnavailable, Type: TypeAPI, Retryable: true}).Retryable != nil {
+	if len(toWire(&Error{Code: CodeServiceUnavailable, Type: TypeAPI, Retryable: true}).Retryable) != 0 {
 		t.Fatal("retryable:true must never be emitted")
 	}
 
-	if toWire(&Error{Code: CodeInvalidAPIKey, Type: TypeAuthentication}).Retryable != nil {
+	if len(toWire(&Error{Code: CodeInvalidAPIKey, Type: TypeAuthentication}).Retryable) != 0 {
 		t.Fatal("a code that is never retried has nothing to deny")
 	}
 }
@@ -146,6 +146,15 @@ func TestFromWireRetryableCanOnlyTurnRetriesOff(t *testing.T) {
 
 	if !fromWire(parse(CodeRateLimited, `,"retryable":null`), 429, "").Retryable {
 		t.Fatal("a null flag is no flag")
+	}
+}
+
+func TestParseEnvelopeKeepsTheErrorWhateverTheRetryableFlagIs(t *testing.T) {
+	for _, flag := range []string{`"no"`, `1`, `{}`, `[]`, `null`} {
+		w := parseEnvelope([]byte(`{"error":{"message":"m","type":"api_error","code":"upstream_error","retryable":` + flag + `}}`))
+		if w == nil || w.Code != CodeUpstreamError || w.Message != "m" {
+			t.Errorf("retryable=%s: envelope %+v", flag, w)
+		}
 	}
 }
 

@@ -91,6 +91,58 @@ func TestACallerIdempotencyKeyMustBeOneToTwoFiftyFivePrintableASCII(t *testing.T
 	}
 }
 
+// errorBody is an engine error object with a raw "retryable" value (JSON text, any type).
+func errorBody(code, typ, retryable string) []byte {
+	return []byte(`{"error":{"message":"m","type":"` + typ + `","code":"` + code + `","request_id":"r1","retryable":` + retryable + `}}`)
+}
+
+func TestAnOddRetryableFlagNeverHidesTheRealError(t *testing.T) {
+	// A flag that is not a bool must be ignored: the error keeps its code, type, request id and
+	// the retryability its code implies. Only an explicit false turns retries off; true is ignored.
+	for _, tc := range []struct {
+		flag             string
+		retryableCodeNow bool // does a normally-retryable code stay retryable?
+	}{
+		{`"no"`, true}, {`1`, true}, {`0`, true}, {`"false"`, true}, {`{}`, true}, {`[]`, true}, {`null`, true},
+		{`true`, true}, {`false`, false}, {` false `, false},
+	} {
+		// [1] An HTTP answer for a never-retried code.
+		e := fakeengine.New()
+		e.On("POST", "/v1/chat/completions", fakeengine.Reply{Status: 401, Body: errorBody("invalid_api_key", "authentication_error", tc.flag)})
+
+		_, err := newClient(e).Chat.Create(context.Background(), hello())
+		if got := asError(t, err); got.Code != meridian.CodeInvalidAPIKey || got.Type != meridian.TypeAuthentication ||
+			got.Status != 401 || got.RequestID != "r1" || got.Retryable {
+			t.Errorf("HTTP 401, retryable=%s: got %+v", tc.flag, got)
+		}
+
+		// [2] An HTTP answer for a retryable code.
+		e = fakeengine.New()
+		e.On("POST", "/v1/chat/completions", fakeengine.Reply{Status: 503, Body: errorBody("service_unavailable", "api_error", tc.flag)})
+
+		_, err = newClient(e, meridian.WithMaxRetries(0)).Chat.Create(context.Background(), hello())
+		if got := asError(t, err); got.Code != meridian.CodeServiceUnavailable || got.Type != meridian.TypeAPI ||
+			got.Status != 503 || got.Retryable != tc.retryableCodeNow {
+			t.Errorf("HTTP 503, retryable=%s: got %+v", tc.flag, got)
+		}
+
+		// [3] A mid-stream error frame, for both kinds of code.
+		for code, want := range map[string]bool{"invalid_api_key": false, "upstream_unavailable": tc.retryableCodeNow} {
+			typ := "authentication_error"
+			if code == "upstream_unavailable" {
+				typ = "api_error"
+			}
+
+			s, _ := streamOf(t, fakeengine.Reply{Body: fakeengine.SSE(fakeengine.Chunk("a"), string(errorBody(code, typ, tc.flag)))})
+
+			_, err := s.Text()
+			if got := asError(t, err); got.Code != code || got.Type != typ || got.RequestID != "r1" || got.Retryable != want {
+				t.Errorf("stream %s, retryable=%s: got %+v", code, tc.flag, got)
+			}
+		}
+	}
+}
+
 func TestZeroValueClientsReturnAConfigErrorInsteadOfPanicking(t *testing.T) {
 	var nilChat *meridian.ChatService
 
