@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
@@ -82,10 +83,66 @@ func (t *transport) do(ctx context.Context, c call) (*http.Response, *Error) {
 		payload = b
 	}
 
-	// [3] One attempt (Task 5 adds the retry loop here).
-	resp, _, err := t.attempt(ctx, c, payload)
+	// [3] Attempt; retry only what the policy allows, honouring Retry-After.
+	for attempt := 0; ; attempt++ {
+		resp, after, err := t.attempt(ctx, c, payload)
+		if err == nil {
+			return resp, nil
+		}
 
-	return resp, err
+		if attempt >= t.cfg.maxRetries || !allowed(c.policy, err) {
+			return nil, err
+		}
+
+		wait := after
+		if wait > maxRetryAfter {
+			return nil, err
+		}
+
+		if wait <= 0 {
+			wait = backoff(attempt)
+		}
+
+		if !sleep(ctx, wait) {
+			return nil, abortedError(ctx.Err())
+		}
+	}
+}
+
+// maxRetryAfter is the longest engine-requested wait the SDK will sleep for.
+const maxRetryAfter = 30 * time.Second
+
+// allowed reports whether the policy permits retrying err.
+func allowed(p retryPolicy, err *Error) bool {
+	if !err.Retryable {
+		return false
+	}
+
+	if p == retryRateLimitOnly {
+		return err.Code == CodeRateLimited
+	}
+
+	return true
+}
+
+// backoff is exponential with jitter: 250–500 ms, doubling, capped at 4–8 s.
+func backoff(attempt int) time.Duration {
+	base := min(500*time.Millisecond<<min(attempt, 10), 8*time.Second)
+
+	return base/2 + rand.N(base/2+1)
+}
+
+// sleep waits d or until ctx ends; false means ctx ended.
+func sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // attempt sends the request once. It returns the response, the engine's Retry-After (-1 if
