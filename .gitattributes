@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Brand artwork is kept byte for byte (no line-ending normalisation)
+assets/brand/*.svg -text
