@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/forward"
-	"meridian.local/meridian-go/internal/fakeengine"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/forward"
+	"github.com/Gaussian-id/meridian-go/internal/fakeengine"
 )
 
 var serverKey = "gmr_" + strings.Repeat("f", 64)

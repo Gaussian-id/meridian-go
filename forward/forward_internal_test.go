@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 // The handler never passes nil today; if a future path does, it must fail closed.

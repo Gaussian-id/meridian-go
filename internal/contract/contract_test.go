@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/forward"
-	"meridian.local/meridian-go/internal/contractguard"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/forward"
+	"github.com/Gaussian-id/meridian-go/internal/contractguard"
 )
 
 // model is in the simulator catalogue; failModel's direct call always fails there, so the engine

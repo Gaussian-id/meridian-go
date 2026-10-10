@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/internal/fakeengine"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/internal/fakeengine"
 )
 
 func streamOf(t *testing.T, reply fakeengine.Reply) (*meridian.ChatStream, *fakeengine.Engine) {

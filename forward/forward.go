@@ -19,8 +19,8 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/internal/idemkey"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/internal/idemkey"
 )
 
 // Decision is what an authorisation check decided.

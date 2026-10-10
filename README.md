@@ -9,7 +9,7 @@
 
 The official Go SDK for Gauss Meridian — one API for many AI models, routed by Meridian.
 
-**Status:** private, unpublished. Version `0.0.0` (`meridian.Version`). Needs **Go 1.23** or newer. No
+**Status:** Public preview, v0.1.0 (`meridian.Version`). Needs **Go 1.23** or newer. No
 dependencies beyond the Go standard library.
 
 - **A server client** for chat (buffered and streamed) and the model list.
@@ -35,24 +35,12 @@ dependencies beyond the Go standard library.
 
 ## Install
 
-The module path is `meridian.local/meridian-go` until publication. It then moves to
-`github.com/Gaussian-id/meridian-go` (owner decision O47), and the import paths change with it.
-
-Until it is published, depend on a checkout with a `replace` directive:
-
 ```sh
-go mod edit -require=meridian.local/meridian-go@v0.0.0
-go mod edit -replace=meridian.local/meridian-go=/path/to/meridian-go
-```
-
-After publication:
-
-```sh
-go get github.com/Gaussian-id/meridian-go
+go get github.com/Gaussian-id/meridian-go@v0.1.0
 ```
 
 ```go
-import "meridian.local/meridian-go" // package meridian; becomes github.com/Gaussian-id/meridian-go
+import "github.com/Gaussian-id/meridian-go" // package meridian
 ```
 
 ## Quick start
@@ -76,7 +64,7 @@ import (
 	"log"
 	"os"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 func main() {
@@ -104,7 +92,7 @@ import (
 	"log"
 	"os"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 func main() {
@@ -169,8 +157,8 @@ import (
 	"net/http"
 	"os"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/forward"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/forward"
 )
 
 func main() {
@@ -308,7 +296,7 @@ import (
 	"os"
 	"time"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 func main() {
@@ -426,7 +414,7 @@ import (
 	"net/http"
 	"os"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 func main() {
@@ -537,7 +525,7 @@ import (
 	"log"
 	"os"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 func main() {

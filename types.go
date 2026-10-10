@@ -3,7 +3,7 @@ package meridian
 import (
 	"encoding/json"
 
-	"meridian.local/meridian-go/internal/idemkey"
+	"github.com/Gaussian-id/meridian-go/internal/idemkey"
 )
 
 // Role is a message role. The engine forwards any role as sent; these are the ones providers accept.

@@ -16,7 +16,7 @@ import (
 	"slices"
 	"strings"
 
-	"meridian.local/meridian-go/internal/contractguard"
+	"github.com/Gaussian-id/meridian-go/internal/contractguard"
 )
 
 // command is the suite: only the contract package, built with the contract tag, never cached.

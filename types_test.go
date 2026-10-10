@@ -3,8 +3,8 @@ package meridian_test
 import (
 	"testing"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/internal/gen/public"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/internal/gen/public"
 )
 
 func TestPublicTypesConformToThePinnedSpec(t *testing.T) {

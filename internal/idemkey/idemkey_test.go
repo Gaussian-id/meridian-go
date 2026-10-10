@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"meridian.local/meridian-go/internal/idemkey"
+	"github.com/Gaussian-id/meridian-go/internal/idemkey"
 )
 
 func TestValid(t *testing.T) {

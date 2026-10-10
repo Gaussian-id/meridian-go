@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"testing"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 func TestEngineSpecCommitIsRecorded(t *testing.T) {

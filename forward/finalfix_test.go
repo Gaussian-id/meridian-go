@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"meridian.local/meridian-go/forward"
-	"meridian.local/meridian-go/internal/fakeengine"
+	"github.com/Gaussian-id/meridian-go/forward"
+	"github.com/Gaussian-id/meridian-go/internal/fakeengine"
 )
 
 const (

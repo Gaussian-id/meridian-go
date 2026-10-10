@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"meridian.local/meridian-go/internal/contractguard"
+	"github.com/Gaussian-id/meridian-go/internal/contractguard"
 )
 
 // simulator answers the guard's docker calls as a simulator engine started from envFile would. It

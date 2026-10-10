@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"meridian.local/meridian-go"
+	"github.com/Gaussian-id/meridian-go"
 )
 
 func pinnedErrorBody(t *testing.T) (codes, types []string) {

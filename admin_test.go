@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/internal/fakeengine"
-	"meridian.local/meridian-go/internal/gen/admin"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/internal/fakeengine"
+	"github.com/Gaussian-id/meridian-go/internal/gen/admin"
 )
 
 var integratorKey = "gmi_" + strings.Repeat("1", 64)

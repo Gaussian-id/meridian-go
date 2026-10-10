@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/internal/fakeengine"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/internal/fakeengine"
 )
 
 func TestAKeyWithBytesUnsafeInAHeaderIsRefusedWithoutSending(t *testing.T) {

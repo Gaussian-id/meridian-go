@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"meridian.local/meridian-go/internal/fakeengine"
+	"github.com/Gaussian-id/meridian-go/internal/fakeengine"
 )
 
 func testTransport(e *fakeengine.Engine, opts ...Option) *transport {

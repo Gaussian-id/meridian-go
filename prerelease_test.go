@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"meridian.local/meridian-go"
-	"meridian.local/meridian-go/internal/fakeengine"
+	"github.com/Gaussian-id/meridian-go"
+	"github.com/Gaussian-id/meridian-go/internal/fakeengine"
 )
 
 // noPanic runs f and reports a panic as a test failure, so one panic does not hide the rest.
