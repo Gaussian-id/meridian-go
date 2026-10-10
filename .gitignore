@@ -1,3 +1,9 @@
 .bin/
 .omc/
 .superpowers/
+.env
+.env.*
+*.exe
+*.test
+*.out
+dist/
