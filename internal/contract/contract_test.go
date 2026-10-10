@@ -453,8 +453,9 @@ func TestContractRevokedKey(t *testing.T) {
 		t.Fatal("the revoked key still works 8 s after the revocation")
 	}
 
-	if refused.Code != meridian.CodeKeyRevoked && refused.Code != meridian.CodeInvalidAPIKey {
-		t.Fatalf("code %s, want key_revoked or invalid_api_key", refused.Code)
+	// The engine keeps a revoked key's hash and answers key_revoked (meridian-store identity.rs; grant.rs)
+	if refused.Code != meridian.CodeKeyRevoked {
+		t.Fatalf("code %s, want key_revoked", refused.Code)
 	}
 
 	if refused.Status != http.StatusUnauthorized {
