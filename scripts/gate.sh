@@ -10,10 +10,12 @@ if [ -n "$unformatted" ]; then echo "gofmt needed: $unformatted" >&2; exit 1; fi
 
 # [2] Vet and static analysis (staticcheck is an approved dev-only tool).
 go vet ./...
+go vet -tags contract ./... # the contract suite builds, though only scripts/contract.sh runs it
 if [ ! -x "$bin/staticcheck" ] && [ ! -x "$bin/staticcheck.exe" ]; then
   GOBIN="$bin" go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
 fi
 "$bin/staticcheck" ./...
+"$bin/staticcheck" -tags contract ./internal/contract/
 
 # [3] Tests, with the race detector when this machine can build it (it needs cgo).
 if go test -race -count=1 -run '^$' ./... >/dev/null 2>&1; then race=-race; else
@@ -31,7 +33,7 @@ fi
 # reduced to its module path, and only this module's own path (matched whole, not as a prefix) is
 # allowed; a package with no module is shown by its import path.
 module=$(go list -m)
-third=$(go list -deps -test -f '{{if not .Standard}}{{with .Module}}{{.Path}}{{else}}{{.ImportPath}}{{end}}{{end}}' ./... | sort -u | grep -vxF "$module" || true)
+third=$(go list -tags contract -deps -test -f '{{if not .Standard}}{{with .Module}}{{.Path}}{{else}}{{.ImportPath}}{{end}}{{end}}' ./... | sort -u | grep -vxF "$module" || true)
 if [ -n "$third" ]; then echo "third-party imports: $third" >&2; exit 1; fi
 
 echo "gate: all checks passed"

@@ -345,6 +345,53 @@ one). If your billing needs supplier rates, it reads them from the engine's admi
 bash scripts/gate.sh   # gofmt, vet, staticcheck, tests (-race where cgo exists), generated-type drift, stdlib-only check
 ```
 
+### The contract run (simulator only)
+
+The contract suite (`internal/contract`, build tag `contract`) runs the SDK against the real local
+engine, and only while that engine is in **simulator mode**: the engine talks to its provider
+simulator, never to Google or OpenRouter, so the run cannot spend money. `go test ./...` never
+builds it. Start it with:
+
+```sh
+bash scripts/contract.sh      # or: go run ./internal/cmd/contract
+```
+
+Run it in the same environment the engine was started from: the same `LOCALAPPDATA` (or
+`XDG_STATE_HOME`/`HOME`), and `GAUSSMERIDIAN_LOCAL_PROJECT` if the engine runs under another compose
+project than `meridian-engine`. `MERIDIAN_PUBLIC_URL` and `MERIDIAN_ADMIN_URL` default to
+`http://127.0.0.1:8180` and `:8181`.
+
+The guard (`internal/contractguard`, a port of the Python guard) decides first and refuses, by name
+only, never printing a value, when:
+
+- the runtime folder cannot be located, or `MERIDIAN_RUNTIME_DIR`, `GAUSSMERIDIAN_ENV_FILE` or a key
+  file resolves outside it (symlinks and junctions are followed);
+- a paid provider key is set in the process or in any env file the engine or the suite could read
+  (any character outside printable ASCII and tab makes a file uncheckable, `NAME=''` counts as set,
+  and a missing or non-UTF-8 env file refuses);
+- a URL is not loopback, or a proxy is configured in the environment or the Windows registry;
+- the engine is not proven to be the simulator. Through `docker` (fixed argv, no shell) it requires:
+  `provider-sim` running exactly once in the project; exactly one engine container, owning
+  `127.0.0.1:8180` and `:8181` (the URLs' ports); the engine's provider settings equal to the
+  simulator's (base URLs at `provider-sim:8184`, `GAUSSMERIDIAN_PROVIDER_SIMULATOR=true`, both paid
+  keys equal to the public dummy `sim-local-key`), compared inside the `docker inspect --format`
+  template so only match tokens come out; and the compose label
+  `com.docker.compose.project.environment_file` naming this runtime's env file. A throwaway
+  `LOCALAPPDATA` is therefore honoured only when the live engine was started from it.
+
+Then the engine must answer `/ready`, and the first call (the canary) must return the simulator's
+fixed reply, `sim token 1` … `sim token 10` with 10 completion tokens; otherwise the run aborts.
+The suite covers chat create, an invalid key (`invalid_api_key`), a stream of exactly 10 text
+pieces with usage, the `sim-fail` model's fallback, admin provisioning (organisation, project, key
+issue, list, revoke) with an organisation of its own, a revoked key refused when used directly, and
+the forward handler: buffered and streamed against the engine, and the generic 503 for the revoked
+key. An error frame in the middle of a stream cannot be produced by the simulator and stays in the
+fake-engine tests. The suite runs offline (`GOPROXY=off`, `GOFLAGS=-mod=readonly`) with
+`NO_PROXY=*`.
+
+`MERIDIAN_GUARD_ORACLES=1 go test -run Oracle ./internal/contractguard/` also checks the guard
+against copies of the engine's local-up env readers (pwsh and bash).
+
 `internal/gen` holds types generated from the pinned engine documents in `spec/`
 (`bash scripts/generate.sh`); they are a test oracle that the hand-written public types are held to,
 not the public API. `meridian.EngineSpecCommit()` returns the engine commit they were checked
