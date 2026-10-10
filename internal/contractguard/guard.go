@@ -21,16 +21,22 @@ import (
 	"unicode/utf8"
 )
 
-// The paid provider keys: when either is set the engine would call a paid provider.
+// The paid provider keys: when any is set the engine would call a paid provider.
 const (
 	Gemini     = "GAUSSMERIDIAN_GEMINI_API_KEY"
 	OpenRouter = "GAUSSMERIDIAN_OPENROUTER_API_KEY"
+	OpenAI     = "GAUSSMERIDIAN_OPENAI_API_KEY"
+	Anthropic  = "GAUSSMERIDIAN_ANTHROPIC_API_KEY"
+	XAI        = "GAUSSMERIDIAN_XAI_API_KEY"
+	DeepSeek   = "GAUSSMERIDIAN_DEEPSEEK_API_KEY"
+	Mistral    = "GAUSSMERIDIAN_MISTRAL_API_KEY"
+	Qwen       = "GAUSSMERIDIAN_QWEN_API_KEY"
 )
 
 const envFileName = "meridian-engine.env"
 
 var (
-	paidKeys = []string{Gemini, OpenRouter}
+	paidKeys = []string{Gemini, OpenRouter, OpenAI, Anthropic, XAI, DeepSeek, Mistral, Qwen}
 	keyFiles = []string{"local-api-key.txt", "local-integrator-key.txt"}
 
 	// DefaultURLs are the engine's loopback listeners when the environment names none.
@@ -78,8 +84,8 @@ var printable = regexp.MustCompile(`^[\t\x20-\x7e]*$`)
 
 // The only line with a paid name that leaves it unset: `[export |set ]NAME =` (or `:`), then
 // nothing or `""`. Two single quotes are a value: both local-up readers strip double quotes only.
-var emptyAssignment = regexp.MustCompile(`^(?:(?:export|set)[ \t]+)?(?:` + strings.ToLower(Gemini) + `|` +
-	strings.ToLower(OpenRouter) + `)[ \t]*[=:](?:"")?$`)
+var emptyAssignment = regexp.MustCompile(`^(?:(?:export|set)[ \t]+)?(?:` +
+	strings.ToLower(strings.Join(paidKeys, `|`)) + `)[ \t]*[=:](?:"")?$`)
 
 // PaidKeysIn returns the names of the paid provider keys an env file's text may set, never a
 // value. It is not a parser but an allowlist: a text with any character outside printable ASCII
