@@ -26,7 +26,8 @@ func simulator(envFile string) contractguard.Docker {
 		case args[0] == "port":
 			return "127.0.0.1:" + strings.TrimSuffix(args[2], "/tcp") + "\n", nil
 		case args[0] == "inspect" && args[3] == contractguard.SimTemplate:
-			return "gemini_base openrouter_base sim_flag gemini_dummy openrouter_dummy ", nil
+			return "gemini_base openrouter_base sim_flag gemini_dummy openrouter_dummy " +
+				"openai_dummy anthropic_dummy xai_dummy deepseek_dummy mistral_dummy qwen_dummy ", nil
 		case args[0] == "inspect" && args[3] == contractguard.EnvFileTemplate:
 			return envFile + "\n", nil
 		}

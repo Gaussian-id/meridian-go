@@ -43,7 +43,8 @@ const (
 // secret is a stand-in value built at run time; no message may ever contain it.
 var secret = "v" + strings.Repeat("q", 24)
 
-var both = []string{G, O}
+// both is every paid name: what a text that cannot be checked reports (the historical name is kept).
+var both = []string{G, O, OpenAI, Anthropic, XAI, DeepSeek, Mistral, Qwen}
 
 type textCase struct {
 	text  string
@@ -321,7 +322,7 @@ func reviewFixtures() map[string]string {
 		"r3-backtick-hash":      "A=`x\n# " + G + "=FAKER3Q\n`\n",
 	}
 
-	for _, name := range both {
+	for _, name := range []string{G, O} {
 		for at, letter := range name {
 			if letter == 'I' {
 				f[fmt.Sprintf("r3-dotted-%c-%d", name[14], at)] = name[:at] + dotted + name[at+1:] + "=FAKEDOT\n"
@@ -382,7 +383,7 @@ func TestAFileWithTwoByteOrderMarksCannotBeChecked(t *testing.T) {
 
 func TestAValueNeverComesBack(t *testing.T) {
 	found := PaidKeysIn(G + "=" + secret + "\n" + O + "=\"" + secret + "\"")
-	if !slices.Equal(found, both) || strings.Contains(fmt.Sprint(found), secret) {
+	if !slices.Equal(found, []string{G, O}) || strings.Contains(fmt.Sprint(found), secret) {
 		t.Fatalf("got %v", found)
 	}
 }
@@ -403,7 +404,7 @@ func TestTheProcessEnvironmentIsJudgedByNameAndWithoutCase(t *testing.T) {
 	}
 
 	// Always in the same order, whatever order the environment is walked in.
-	if got := PaidKeysInEnviron(Environ{O: " ", G: "x"}); !slices.Equal(got, both) {
+	if got := PaidKeysInEnviron(Environ{O: " ", G: "x"}); !slices.Equal(got, []string{G, O}) {
 		t.Errorf("got %v", got)
 	}
 }

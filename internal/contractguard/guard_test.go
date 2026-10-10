@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,20 @@ type fakeDocker struct {
 	calls     [][]string
 }
 
+// newKeys are the engine's direct-provider keys, with the token each dummy prints.
+var newKeys = []struct{ name, token string }{
+	{OpenAI, "openai_dummy"},
+	{Anthropic, "anthropic_dummy"},
+	{XAI, "xai_dummy"},
+	{DeepSeek, "deepseek_dummy"},
+	{Mistral, "mistral_dummy"},
+	{Qwen, "qwen_dummy"},
+}
+
+// allTokens is what the allowlisted comparison prints for a healthy simulator engine.
+const allTokens = "gemini_base openrouter_base sim_flag gemini_dummy openrouter_dummy " +
+	"openai_dummy anthropic_dummy xai_dummy deepseek_dummy mistral_dummy qwen_dummy "
+
 // proven is the docker of a simulator engine started from envFile.
 func proven(envFile string) *fakeDocker {
 	return &fakeDocker{
@@ -67,7 +82,7 @@ func proven(envFile string) *fakeDocker {
 		providers: "fedcba987654\n",
 		engines:   engineID + "\n",
 		ports:     map[string]string{"8180/tcp": "127.0.0.1:8180\n", "8181/tcp": "127.0.0.1:8181\n"},
-		env:       "gemini_base openrouter_base sim_flag gemini_dummy openrouter_dummy ",
+		env:       allTokens,
 		label:     envFile + "\n",
 	}
 }
@@ -329,6 +344,58 @@ func TestAPaidKeyInTheProcessEnvironmentIsRefusedByName(t *testing.T) {
 	environ, _ := runtimeWith(t, "")
 	refused(t, Refusal(with(environ, strings.ToLower(G), secret), provenSystem(environ)), G)
 	allowed(t, Refusal(with(environ, O, ""), provenSystem(environ)))
+}
+
+func TestANewProviderKeyInTheEnvFileIsRefusedByName(t *testing.T) {
+	for _, k := range newKeys {
+		environ, _ := runtimeWith(t, "A=1\nset "+k.name+"="+secret+"\n")
+		message := Refusal(environ, provenSystem(environ))
+		refused(t, message, k.name)
+
+		if strings.Contains(message, secret) {
+			t.Errorf("%s: the message holds the value", k.name)
+		}
+
+		if got := PaidKeysIn(k.name + "=" + secret); !slices.Equal(got, []string{k.name}) {
+			t.Errorf("%s: got %v", k.name, got)
+		}
+
+		if got := PaidKeysIn(k.name + "=\n"); len(got) != 0 {
+			t.Errorf("%s: an empty assignment counts as set: %v", k.name, got)
+		}
+	}
+}
+
+func TestANewProviderKeyInTheProcessEnvironmentIsRefusedByName(t *testing.T) {
+	for _, k := range newKeys {
+		environ, _ := runtimeWith(t, "")
+		message := Refusal(with(environ, strings.ToLower(k.name), secret), provenSystem(environ))
+		refused(t, message, k.name)
+
+		if strings.Contains(message, secret) {
+			t.Errorf("%s: the message holds the value", k.name)
+		}
+
+		allowed(t, Refusal(with(environ, k.name, ""), provenSystem(environ)))
+
+		if got := PaidKeysInEnviron(Environ{k.name: "x"}); !slices.Equal(got, []string{k.name}) {
+			t.Errorf("%s: got %v", k.name, got)
+		}
+	}
+}
+
+func TestANewProviderKeyThatIsNotThePublicDummyIsRefusedByNameOnly(t *testing.T) {
+	for _, k := range newKeys {
+		message, _ := simCase(t, func(e Environ, d *fakeDocker) Environ {
+			d.env = strings.Replace(d.env, k.token+" ", "", 1)
+			return e
+		})
+		refused(t, message, "missing: "+k.token)
+
+		if strings.Contains(message, "sim-local-key") {
+			t.Errorf("%s: the message holds the dummy", k.name)
+		}
+	}
 }
 
 func TestBothSourcesAreNamedTogether(t *testing.T) {

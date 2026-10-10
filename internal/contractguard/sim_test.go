@@ -50,6 +50,12 @@ func TestTheTemplatesCompareInsideDockerAndPrintOnlyTokens(t *testing.T) {
 		`{{if eq . "GAUSSMERIDIAN_PROVIDER_SIMULATOR=true"}}sim_flag {{end}}`,
 		`{{if eq . "GAUSSMERIDIAN_GEMINI_API_KEY=sim-local-key"}}gemini_dummy {{end}}`,
 		`{{if eq . "GAUSSMERIDIAN_OPENROUTER_API_KEY=sim-local-key"}}openrouter_dummy {{end}}`,
+		`{{if eq . "GAUSSMERIDIAN_OPENAI_API_KEY=sim-local-key"}}openai_dummy {{end}}`,
+		`{{if eq . "GAUSSMERIDIAN_ANTHROPIC_API_KEY=sim-local-key"}}anthropic_dummy {{end}}`,
+		`{{if eq . "GAUSSMERIDIAN_XAI_API_KEY=sim-local-key"}}xai_dummy {{end}}`,
+		`{{if eq . "GAUSSMERIDIAN_DEEPSEEK_API_KEY=sim-local-key"}}deepseek_dummy {{end}}`,
+		`{{if eq . "GAUSSMERIDIAN_MISTRAL_API_KEY=sim-local-key"}}mistral_dummy {{end}}`,
+		`{{if eq . "GAUSSMERIDIAN_QWEN_API_KEY=sim-local-key"}}qwen_dummy {{end}}`,
 	} {
 		if !strings.Contains(SimTemplate, entry) {
 			t.Errorf("template lacks %s", entry)
@@ -57,7 +63,7 @@ func TestTheTemplatesCompareInsideDockerAndPrintOnlyTokens(t *testing.T) {
 	}
 
 	if !strings.HasPrefix(SimTemplate, "{{range .Config.Env}}") || !strings.HasSuffix(SimTemplate, "{{end}}") ||
-		strings.Count(SimTemplate, "{{if") != 5 || strings.Contains(SimTemplate, "{{.}}") {
+		strings.Count(SimTemplate, "{{if") != 11 || strings.Contains(SimTemplate, "{{.}}") {
 		t.Fatalf("template %s", SimTemplate)
 	}
 
@@ -101,13 +107,13 @@ func TestEachMissingProofRefuses(t *testing.T) {
 			return with(e, "MERIDIAN_PUBLIC_URL", "http://127.0.0.1:9999")
 		}, "does not own the public and admin ports"},
 		"a real Gemini base URL": {func(e Environ, d *fakeDocker) Environ {
-			d.env = "openrouter_base sim_flag gemini_dummy openrouter_dummy "
+			d.env = strings.Replace(d.env, "gemini_base ", "", 1)
 			return e
 		}, "missing: gemini_base"},
 		"real keys and no simulator flag": {func(e Environ, d *fakeDocker) Environ {
 			d.env = "gemini_base openrouter_base "
 			return e
-		}, "missing: sim_flag, gemini_dummy, openrouter_dummy"},
+		}, "missing: sim_flag, gemini_dummy, openrouter_dummy, openai_dummy, anthropic_dummy, xai_dummy, deepseek_dummy, mistral_dummy, qwen_dummy"},
 		"a token twice": {func(e Environ, d *fakeDocker) Environ { d.env += "sim_flag "; return e },
 			"not set up for the simulator"},
 		"the label names another env file": {func(e Environ, d *fakeDocker) Environ {
@@ -156,7 +162,7 @@ func TestARealModeEngineIsRefused(t *testing.T) {
 		d.env = ""
 		return e
 	})
-	refused(t, message, "missing: gemini_base, openrouter_base, sim_flag, gemini_dummy, openrouter_dummy")
+	refused(t, message, "missing: gemini_base, openrouter_base, sim_flag, gemini_dummy, openrouter_dummy, openai_dummy, anthropic_dummy, xai_dummy, deepseek_dummy, mistral_dummy, qwen_dummy")
 }
 
 func TestTheProjectNameComesFromTheEnvironment(t *testing.T) {

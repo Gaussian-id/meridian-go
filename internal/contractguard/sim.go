@@ -45,14 +45,20 @@ var (
 )
 
 // simEnv are the only environment entries the proof may compare, each by exact equality inside the
-// docker template, so the output is a token and never a value. The two paid keys are compared
-// with the public dummy of the engine's deploy/compose.simulator.yaml and nothing else.
+// docker template, so the output is a token and never a value. Every paid key is compared
+// with the public dummy of the engine's deploy/compose.simulator.yaml (which sets all eight) and nothing else.
 var simEnv = [][2]string{
 	{"gemini_base", "GAUSSMERIDIAN_GEMINI_BASE_URL=http://provider-sim:8184/v1beta"},
 	{"openrouter_base", "GAUSSMERIDIAN_OPENROUTER_BASE_URL=http://provider-sim:8184/api/v1"},
 	{"sim_flag", "GAUSSMERIDIAN_PROVIDER_SIMULATOR=true"},
 	{"gemini_dummy", "GAUSSMERIDIAN_GEMINI_API_KEY=sim-local-key"},
 	{"openrouter_dummy", "GAUSSMERIDIAN_OPENROUTER_API_KEY=sim-local-key"},
+	{"openai_dummy", "GAUSSMERIDIAN_OPENAI_API_KEY=sim-local-key"},
+	{"anthropic_dummy", "GAUSSMERIDIAN_ANTHROPIC_API_KEY=sim-local-key"},
+	{"xai_dummy", "GAUSSMERIDIAN_XAI_API_KEY=sim-local-key"},
+	{"deepseek_dummy", "GAUSSMERIDIAN_DEEPSEEK_API_KEY=sim-local-key"},
+	{"mistral_dummy", "GAUSSMERIDIAN_MISTRAL_API_KEY=sim-local-key"},
+	{"qwen_dummy", "GAUSSMERIDIAN_QWEN_API_KEY=sim-local-key"},
 }
 
 // SimTemplate prints one token per allowlisted setting whose exact text the engine container has.

@@ -674,14 +674,17 @@ only, never printing a value, when:
 
 - the runtime folder cannot be located, or `MERIDIAN_RUNTIME_DIR`, `GAUSSMERIDIAN_ENV_FILE` or a key
   file resolves outside it (symlinks and junctions are followed);
-- a paid provider key is set in the process or in any env file the engine or the suite could read
+- a paid provider key (`GAUSSMERIDIAN_GEMINI_API_KEY`, `GAUSSMERIDIAN_OPENROUTER_API_KEY`,
+  `GAUSSMERIDIAN_OPENAI_API_KEY`, `GAUSSMERIDIAN_ANTHROPIC_API_KEY`, `GAUSSMERIDIAN_XAI_API_KEY`,
+  `GAUSSMERIDIAN_DEEPSEEK_API_KEY`, `GAUSSMERIDIAN_MISTRAL_API_KEY`, `GAUSSMERIDIAN_QWEN_API_KEY`) is
+  set in the process or in any env file the engine or the suite could read
   (any character outside printable ASCII and tab makes a file uncheckable, `NAME=''` counts as set,
   and a missing or non-UTF-8 env file refuses);
 - a URL is not loopback, or a proxy is configured in the environment or the Windows registry;
 - the engine is not proven to be the simulator. Through `docker` (fixed argv, no shell) it requires:
   `provider-sim` running exactly once in the project; exactly one engine container, owning
   `127.0.0.1:8180` and `:8181` (the URLs' ports); the engine's provider settings equal to the
-  simulator's (base URLs at `provider-sim:8184`, `GAUSSMERIDIAN_PROVIDER_SIMULATOR=true`, both paid
+  simulator's (base URLs at `provider-sim:8184`, `GAUSSMERIDIAN_PROVIDER_SIMULATOR=true`, each of the eight paid
   keys equal to the public dummy `sim-local-key`), compared inside the `docker inspect --format`
   template so only match tokens come out; and the compose label
   `com.docker.compose.project.environment_file` naming this runtime's env file. A throwaway
