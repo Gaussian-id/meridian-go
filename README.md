@@ -124,6 +124,9 @@ func main() {
   call, not as a crash at start-up.
 - Leave `ChatParams.Model` empty to let Meridian choose; the SDK never fills a model in. Fields the
   struct does not have go in `ChatParams.Extra`.
+- To request a reasoning effort, set `ChatParams.Model` to `meridian/auto:low` or append
+  `:<effort>` to a named model. Efforts are case-sensitive: `low`, `medium`, `high`, `xhigh`, `max`.
+  Browser forwarding drops `model` by default; `AllowRule.Model: true` forwards any model string.
 - `Chat.Create` always sends `"stream": false`; `Chat.Stream` always sends `"stream": true` and asks
   for usage (`"stream_options": {"include_usage": true}`), whatever `Extra` holds.
 - `client.Models.List(ctx)` returns the models the key may use.
